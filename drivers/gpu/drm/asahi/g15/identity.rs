@@ -37,24 +37,35 @@ impl fmt::Display for Hex<'_> {
     }
 }
 
-/// Copies `size` bytes at physical `phys`, a range outside the kernel's System RAM, into a
-/// private copy through a temporary write-back mapping.
+/// Copy a mapped range into private memory. The kernel helper can recover from
+/// some synchronous faults; it cannot contain a stalled bus or every SError.
+fn copy_mapped_snapshot(source: *const u8, size: usize) -> Result<KVVec<u8>> {
+    let mut copy = KVVec::from_elem(0u8, size, GFP_KERNEL)?;
+    // SAFETY: `copy` owns `size` writable bytes. `source` is a kernel address
+    // that may fault; the kernel nofault helper handles eligible synchronous
+    // faults without creating a Rust reference to the source.
+    let ret = unsafe {
+        bindings::copy_from_kernel_nofault(copy.as_mut_ptr().cast(), source.cast(), size)
+    };
+    if ret != 0 {
+        return Err(EFAULT);
+    }
+    Ok(copy)
+}
+
+/// Copies a caller-selected physical range into private memory through a temporary write-back
+/// mapping. Mapping does not prove that an access is safe or that cache attributes are suitable.
 pub(crate) fn copy_physical(phys: u64, size: usize) -> Result<KVVec<u8>> {
-    // SAFETY: memremap() of a boot-loader range creates a temporary mapping; it has no other
-    // side effects.
+    // SAFETY: The caller supplies the range; the returned pointer is checked and paired with
+    // memunmap(). This does not establish that the underlying hardware responds safely.
     let map = unsafe { bindings::memremap(phys, size, bindings::MEMREMAP_WB as _) };
     if map.is_null() {
         return Err(ENOMEM);
     }
-    let copy = KVVec::from_elem(0u8, size, GFP_KERNEL).map(|mut copy| {
-        // SAFETY: `map` is a live mapping of `size` bytes and `copy` holds `size` bytes; the two do
-        // not overlap.
-        unsafe { core::ptr::copy_nonoverlapping(map as *const u8, copy.as_mut_ptr(), size) };
-        copy
-    });
+    let copy = copy_mapped_snapshot(map.cast(), size);
     // SAFETY: `map` came from memremap() above and is not used afterwards.
     unsafe { bindings::memunmap(map) };
-    Ok(copy?)
+    copy
 }
 
 impl From<&FirmwareBuild> for Measured {
