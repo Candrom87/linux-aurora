@@ -160,13 +160,20 @@ impl FwObject {
     /// load (words of the unaligned canonical objects).
     pub(crate) fn r32(&self, offset: usize) -> Result<u32> {
         let p = self.ptr(offset, 4)?;
-        // SAFETY: `p` is valid for 4 bytes; Normal non-cacheable memory permits an unaligned
-        // load.
+        // SAFETY: `p` is valid for 4 bytes in Normal non-cacheable memory.
         Ok(u32::from_le(unsafe {
             if p as usize % 4 == 0 {
                 (p as *const u32).read_volatile()
             } else {
-                (p as *const u32).read_unaligned()
+                // `read_unaligned` is not volatile and can be elided or reused even
+                // though firmware changes the word. Rust's volatile u32 load requires
+                // alignment, so use a single AArch64 load with compiler-visible side
+                // effects. An unaligned load is not guaranteed atomic against firmware.
+                let value: u32;
+                core::arch::asm!("ldr {value:w}, [{ptr}]",
+                    value = out(reg) value, ptr = in(reg) p,
+                    options(nostack, readonly, preserves_flags));
+                value
             }
         }))
     }
