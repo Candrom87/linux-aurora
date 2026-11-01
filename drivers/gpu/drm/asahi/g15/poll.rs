@@ -94,7 +94,15 @@ impl Shared {
                             self.mod_poll(msecs_to_jiffies(ms) + 1);
                         }
                     }
-                    Err(error) => self.fail_stop(error),
+                    Err(error) => {
+                        // Some poll errors have already gone through recovery's
+                        // fail-stop. Unexpected errors have not: fail their jobs
+                        // and retain published owners before latching the device.
+                        if firmware.recovery.failed().is_none() {
+                            firmware.fail_stop(error, &mut done);
+                        }
+                        self.fail_stop(error);
+                    }
                 }
             }
         }

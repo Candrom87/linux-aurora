@@ -237,9 +237,16 @@ impl Channels {
     }
 
     /// Consumes a receive ring to its firmware producer.
-    fn drain_one(ring: &Ring, offset: usize) -> Result {
+    fn drain_one(ring: &Ring, offset: usize, slots: u32) -> Result {
         let producer = ring.state.r32(offset + STATE_WRITE)?;
-        if ring.state.r32(offset + STATE_READ)? != producer {
+        let read = ring.state.r32(offset + STATE_READ)?;
+        // Never publish an invalid index back to firmware, or hide a corrupt
+        // consumer position by overwriting it. Trace has more slots than log
+        // and stats, so the caller supplies the ring's capacity.
+        if producer >= slots || read >= slots {
+            return Err(EIO);
+        }
+        if read != producer {
             ring.state.w32(offset + STATE_READ, producer)?;
             wmb();
         }
@@ -281,9 +288,10 @@ impl Channels {
     ) -> Result {
         events.drain(dev, &self.event)?;
         for i in 0..rings::LOG_RINGS {
-            Self::drain_one(&self.log, i * 0x30)?;
+            Self::drain_one(&self.log, i * 0x30, RING_SLOTS)?;
         }
-        Self::drain_one(&self.trace, 0)?;
+        // The 0x7000-byte trace ring holds 512 0x38-byte trace records.
+        Self::drain_one(&self.trace, 0, 2 * RING_SLOTS)?;
         let mut seen = self.stats_seen;
         if let Some(producer) = Self::note_stats(&self.stats, &mut seen)? {
             self.stats_seen = seen;
@@ -295,7 +303,7 @@ impl Channels {
             }
             return Ok(());
         }
-        Self::drain_one(&self.stats, 0)
+        Self::drain_one(&self.stats, 0, RING_SLOTS)
     }
 }
 
