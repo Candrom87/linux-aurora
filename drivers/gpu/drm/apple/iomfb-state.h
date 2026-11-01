@@ -38,7 +38,9 @@ static inline void dcp_mode_set_valid(struct dcp_mode_state *state, bool valid)
 	unsigned long flags;
 
 	spin_lock_irqsave(&state->lock, flags);
-	state->valid = valid;
+	/* A callback that invalidated the in-flight modeset must win until
+	 * dcp_mode_finish() handles it. Idle callers retain their old behavior. */
+	state->valid = valid && !(state->changing && state->invalidated);
 	spin_unlock_irqrestore(&state->lock, flags);
 }
 

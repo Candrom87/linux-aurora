@@ -148,6 +148,39 @@ static void dcp_mode_withdraw_modeset_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, state.valid);
 }
 
+/* A late set-valid request must not resurrect a mode invalidated in flight. */
+static void dcp_mode_set_valid_invalidated_test(struct kunit *test)
+{
+	struct dcp_mode_state state = { };
+	bool connected = true;
+
+	spin_lock_init(&state.lock);
+	dcp_mode_begin(&state);
+	dcp_mode_invalidate(&state);
+	dcp_mode_set_valid(&state, true);
+	KUNIT_EXPECT_FALSE(test, state.valid);
+	KUNIT_EXPECT_EQ(test, dcp_mode_finish(&state, true, &connected),
+			(unsigned int)DCP_HOTPLUG_NOTIFY);
+	KUNIT_EXPECT_FALSE(test, state.valid);
+	/* A new modeset clears the old invalidation and can become valid. */
+	dcp_mode_begin(&state);
+	dcp_mode_set_valid(&state, true);
+	KUNIT_EXPECT_TRUE(test, state.valid);
+	KUNIT_EXPECT_EQ(test, dcp_mode_finish(&state, true, &connected), 0U);
+	KUNIT_EXPECT_TRUE(test, state.valid);
+}
+
+static void dcp_mode_set_valid_outside_modeset_test(struct kunit *test)
+{
+	struct dcp_mode_state state = { .invalidated = true };
+
+	spin_lock_init(&state.lock);
+	dcp_mode_set_valid(&state, true);
+	KUNIT_EXPECT_TRUE(test, state.valid);
+	dcp_mode_set_valid(&state, false);
+	KUNIT_EXPECT_FALSE(test, state.valid);
+}
+
 static struct kunit_case dcp_mode_cases[] = {
 	KUNIT_CASE(dcp_mode_success_test),
 	KUNIT_CASE(dcp_mode_failure_test),
@@ -158,6 +191,8 @@ static struct kunit_case dcp_mode_cases[] = {
 	KUNIT_CASE(dcp_mode_disconnected_test),
 	KUNIT_CASE(dcp_mode_withdraw_idle_test),
 	KUNIT_CASE(dcp_mode_withdraw_modeset_test),
+	KUNIT_CASE(dcp_mode_set_valid_invalidated_test),
+	KUNIT_CASE(dcp_mode_set_valid_outside_modeset_test),
 	{ }
 };
 
