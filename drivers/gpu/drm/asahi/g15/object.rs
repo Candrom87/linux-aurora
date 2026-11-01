@@ -309,17 +309,24 @@ impl Objects {
         let bytes = offset
             .checked_add(req.size)
             .ok_or(EINVAL)?
-            .next_multiple_of(page);
-        if page_va < hw::HOST || page_va + bytes as u64 > hw::HOST + hw::HOST_SIZE {
+            .checked_next_multiple_of(page)
+            .ok_or(EINVAL)?;
+        let end_va = page_va.checked_add(bytes as u64).ok_or(EINVAL)?;
+        if page_va < hw::HOST || end_va > hw::HOST + hw::HOST_SIZE {
             return Err(EINVAL);
         }
+        let mut next_va = None;
         if let Placement::Anywhere = req.placement {
-            if page_va + bytes as u64 + hw::PAGE > hw::va::FW_ALLOC.end {
+            let guard_end = end_va.checked_add(hw::PAGE).ok_or(EINVAL)?;
+            if guard_end > hw::va::FW_ALLOC.end {
                 return Err(ENOSPC);
             }
+            next_va = Some(guard_end);
         }
         if let Some((gpage, _)) = req.client {
-            if gpage & (hw::PAGE - 1) != 0 || gpage + bytes as u64 > hw::USER_RANGE.end {
+            if gpage & (hw::PAGE - 1) != 0 ||
+                gpage.checked_add(bytes as u64).ok_or(EINVAL)? > hw::USER_RANGE.end
+            {
                 return Err(EINVAL);
             }
             if self.clients.len() == hw::sizes::MAX_CLIENT {
@@ -393,9 +400,9 @@ impl Objects {
         }
         self.window
             .sync_range(&self.uat, page_va..page_va + bytes as u64)?;
-        if let Placement::Anywhere = req.placement {
+        if let Some(next_va) = next_va {
             // Skip an unmapped guard page after the object.
-            self.fw_next += bytes as u64 + hw::PAGE;
+            self.fw_next = next_va;
         }
         if let Some(lower) = req.lower {
             if lower & (hw::PAGE - 1) != 0 {
