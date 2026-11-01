@@ -12,8 +12,8 @@
 //! belong to one build, so nothing is written before the build is identified.
 //!
 //! Bring-up escape hatch: `g15_accept_text_prefix=<hex>` admits an unpinned build whose digest
-//! starts with those 8 bytes (the full digest and marker offset are logged, so that the build
-//! can be pinned by the next kernel).
+//! starts with those 8 bytes and whose segment sizes and marker match a known layout (the full
+//! digest and marker offset are logged). The escape does not qualify a new firmware ABI.
 
 use kernel::{bindings, device, fmt, prelude::*};
 

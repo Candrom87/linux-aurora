@@ -66,15 +66,19 @@ pub(crate) fn prefix(sha256: &[u8; 32]) -> u64 {
 }
 
 /// Looks `m` up in `qualified`, each build with whether this machine is the one it names; an
-/// unqualified build is admitted only when `accept_prefix` is nonzero and equals its digest
-/// prefix.
+/// unqualified build is admitted only when `accept_prefix` is nonzero, equals its digest
+/// prefix, and its segment sizes and marker match at least one known layout. The override
+/// continues to bypass the machine qualifier; it does not qualify a new firmware ABI.
 pub(crate) fn verdict(
     m: &Measured,
     qualified: impl IntoIterator<Item = (Measured, bool)>,
     accept_prefix: u64,
 ) -> Verdict {
-    if let Some(i) = qualified.into_iter().position(|(q, machine)| {
-        matching::exact(
+    let mut layout_matches = false;
+    for (i, (q, machine)) in qualified.into_iter().enumerate() {
+        layout_matches |= q.text_size == m.text_size && q.data_size == m.data_size &&
+            q.marker == m.marker;
+        if matching::exact(
             (q.text_size, q.data_size),
             (m.text_size, m.data_size),
             q.marker,
@@ -82,11 +86,11 @@ pub(crate) fn verdict(
             &q.sha256,
             &m.sha256,
             machine,
-        )
-    }) {
-        return Verdict::Pinned(i);
+        ) {
+            return Verdict::Pinned(i);
+        }
     }
-    if accept_prefix != 0 && accept_prefix == prefix(&m.sha256) {
+    if layout_matches && accept_prefix != 0 && accept_prefix == prefix(&m.sha256) {
         Verdict::Admitted
     } else {
         Verdict::Refused
@@ -201,6 +205,20 @@ mod tests {
             verdict(&m, [(build(1), true)], prefix(&build(4).sha256)),
             Verdict::Refused
         );
+    }
+
+    #[test]
+    fn prefix_must_not_bypass_firmware_geometry() {
+        let reference = build(1);
+        for measured in [
+            Measured { text_size: reference.text_size + 0x4000, ..reference },
+            Measured { data_size: reference.data_size + 0x4000, ..reference },
+            Measured { marker: reference.marker + 8, ..reference },
+        ] {
+            assert_eq!(verdict(&measured, [(reference, true)], prefix(&measured.sha256)),
+                       Verdict::Refused);
+        }
+        assert_eq!(verdict(&reference, [], prefix(&reference.sha256)), Verdict::Refused);
     }
 
     #[test]
