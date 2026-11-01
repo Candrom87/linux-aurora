@@ -8,6 +8,8 @@
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 #include <linux/err.h>
+#include <linux/init.h>
+#include <linux/kstrtox.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
@@ -37,6 +39,86 @@
 
 #define APPLE_PMGR_PS_SET_TIMEOUT 100
 #define APPLE_PMGR_RESET_TIME 1
+
+#if IS_ENABLED(CONFIG_APPLE_T6034_GPU_DIAG_NO_AUTO)
+/* Experimental one-shot test kernel only: never enabled without the option. */
+static bool t6034_gpu_diag_no_auto;
+static bool t6034_gpu_diag_afr_hold;
+
+static int __init t6034_gpu_diag_setup(char *arg)
+{
+	return kstrtobool(arg, &t6034_gpu_diag_no_auto);
+}
+early_param("apple_t6034_gpu_diag.no_auto", t6034_gpu_diag_setup);
+
+static int __init t6034_gpu_diag_afr_setup(char *arg)
+{
+	return kstrtobool(arg, &t6034_gpu_diag_afr_hold);
+}
+early_param("apple_t6034_gpu_diag.afr_hold", t6034_gpu_diag_afr_setup);
+
+static bool t6034_gpu_diag_match(bool opted, bool board, bool soc, bool compatible,
+				resource_size_t base, resource_size_t size, u32 offset)
+{
+	return opted && board && soc && compatible && base == 0x408e80000ULL &&
+	       size == 0x4000 && offset == 0x110;
+}
+
+static bool t6034_gpu_diag_domain(struct device_node *node, u32 offset)
+{
+	struct device_node *parent;
+	struct resource res;
+	bool match = false;
+
+	if (!t6034_gpu_diag_no_auto || !of_machine_is_compatible("apple,j514m") ||
+	    !of_machine_is_compatible("apple,t6034") ||
+	    !of_device_is_compatible(node, "apple,t6031-pmgr-pwrstate"))
+		return false;
+	parent = of_get_parent(node);
+	if (parent && of_device_is_compatible(parent, "apple,t6031-pmgr") &&
+	    !of_address_to_resource(parent, 0, &res))
+		match = t6034_gpu_diag_match(true, true, true, true, res.start,
+					    resource_size(&res), offset);
+	of_node_put(parent);
+	return match;
+}
+
+static bool t6034_gpu_diag_afr_match(bool gpu_opted, bool afr_opted, bool board,
+				    bool soc, bool compatible, bool always_on,
+				    bool firmware_owned, resource_size_t base,
+				    resource_size_t size, u32 offset)
+{
+	return gpu_opted && afr_opted && board && soc && compatible && always_on &&
+	       !firmware_owned && base == 0x408e80000ULL && size == 0x4000 &&
+	       offset == 0x100;
+}
+
+static bool t6034_gpu_diag_afr_domain(struct device_node *node, u32 offset)
+{
+	struct device_node *parent;
+	struct resource res;
+	u32 reg[2];
+	bool match = false;
+
+	if (!t6034_gpu_diag_no_auto || !t6034_gpu_diag_afr_hold ||
+	    !of_machine_is_compatible("apple,j514m") ||
+	    !of_machine_is_compatible("apple,t6034") ||
+	    !of_device_is_compatible(node, "apple,t6031-pmgr-pwrstate") ||
+	    of_property_count_u32_elems(node, "reg") != 2 ||
+	    of_property_read_u32_array(node, "reg", reg, 2) ||
+	    reg[0] != offset || reg[1] != 4)
+		return false;
+	parent = of_get_parent(node);
+	if (parent && of_device_is_compatible(parent, "apple,t6031-pmgr") &&
+	    !of_address_to_resource(parent, 0, &res))
+		match = t6034_gpu_diag_afr_match(true, true, true, true, true,
+				of_property_read_bool(node, "apple,always-on"),
+				of_property_read_bool(node, "apple,firmware-owned"),
+				res.start, resource_size(&res), offset);
+	of_node_put(parent);
+	return match;
+}
+#endif
 
 struct apple_pmgr_ps {
 	struct device *dev;
@@ -81,7 +163,9 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 		if (ps->force_reset)
 			reg_pre |= APPLE_PMGR_PS_RESET;
 
-		regmap_write(ps->regmap, ps->offset, reg_pre);
+		ret = regmap_write(ps->regmap, ps->offset, reg_pre);
+		if (ret < 0)
+			return ret;
 
 		ret = regmap_read_poll_timeout_atomic(
 			ps->regmap, ps->offset, cur,
@@ -89,10 +173,12 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 			(reg_pre & (APPLE_PMGR_DEV_DISABLE | APPLE_PMGR_PS_RESET)), 1,
 			APPLE_PMGR_PS_SET_TIMEOUT);
 
-		if (ret < 0)
+		if (ret < 0) {
 			dev_err_ratelimited(ps->dev,
 					    "PS %s: Failed to set reset/disable bits (now: 0x%x)\n",
 					    genpd->name, cur);
+			return ret;
+		}
 	}
 
 	/* Do not replay the hardware-owned BUSY bit in this whole-word write. */
@@ -103,7 +189,9 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 
 	dev_dbg(ps->dev, "PS %s: pwrstate = 0x%x: 0x%x\n", genpd->name, pstate, reg);
 
-	regmap_write(ps->regmap, ps->offset, reg);
+	ret = regmap_write(ps->regmap, ps->offset, reg);
+	if (ret < 0)
+		return ret;
 
 	if (ps->externally_clocked && pstate == APPLE_PMGR_PS_ACTIVE) {
 		/*
@@ -126,28 +214,93 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 				    "PS %s: Failed to reach power state 0x%x (requested 0x%x, now: 0x%x)\n",
 				    genpd->name, pstate, reg, cur);
 
-	if (auto_enable) {
+	if (!ret && auto_enable) {
 		/* Not all devices implement this; this is a no-op where not implemented. */
 		reg |= APPLE_PMGR_AUTO_ENABLE;
-		regmap_write(ps->regmap, ps->offset, reg);
+		ret = regmap_write(ps->regmap, ps->offset, reg);
 	}
 
 	return ret;
 }
 
-static bool apple_pmgr_ps_is_active(struct apple_pmgr_ps *ps)
+static int apple_pmgr_ps_is_active(struct apple_pmgr_ps *ps, bool *active)
 {
-	u32 reg = 0;
+	u32 reg;
+	int ret;
 
-	regmap_read(ps->regmap, ps->offset, &reg);
+	ret = regmap_read(ps->regmap, ps->offset, &reg);
+	if (ret)
+		return ret;
 	/*
 	 * We consider domains as active if they are actually on, or if they have auto-PM
 	 * enabled and the intended target is on.
 	 */
-	return (FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg) == APPLE_PMGR_PS_ACTIVE ||
-		(FIELD_GET(APPLE_PMGR_PS_TARGET, reg) == APPLE_PMGR_PS_ACTIVE &&
-		 reg & APPLE_PMGR_AUTO_ENABLE));
+	*active = (FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg) == APPLE_PMGR_PS_ACTIVE ||
+		   (FIELD_GET(APPLE_PMGR_PS_TARGET, reg) == APPLE_PMGR_PS_ACTIVE &&
+		    reg & APPLE_PMGR_AUTO_ENABLE));
+	return 0;
 }
+
+/* Propagate read or write errors before initializing the generic domain. */
+static int apple_pmgr_ps_program_min(struct apple_pmgr_ps *ps)
+{
+	return regmap_update_bits(ps->regmap, ps->offset,
+				  APPLE_PMGR_FLAGS | APPLE_PMGR_PS_MIN,
+				  FIELD_PREP(APPLE_PMGR_PS_MIN, ps->min_state));
+}
+
+static int apple_pmgr_ps_program_auto(struct apple_pmgr_ps *ps)
+{
+	return regmap_update_bits(ps->regmap, ps->offset,
+				  APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
+				  ps->no_auto_pm ? 0 : APPLE_PMGR_AUTO_ENABLE);
+}
+
+#if IS_ENABLED(CONFIG_APPLE_T6034_GPU_DIAG_NO_AUTO)
+/*
+ * Experimental AFR boot hold. Accept an already active, ungated domain
+ * without writing it, or request active from the observed on-target/auto
+ * state. Restore the original auto bit if the request fails. A successful
+ * synthetic test does not qualify this on real hardware.
+ */
+static int t6034_gpu_diag_hold_afr(struct apple_pmgr_ps *ps)
+{
+	u32 before, after;
+	int ret, restore;
+
+	ret = regmap_read(ps->regmap, ps->offset, &before);
+	if (ret < 0)
+		return ret;
+	dev_info(ps->dev, "experimental AFR initial actual=%u target=%u auto=%u\n",
+		 (unsigned int)FIELD_GET(APPLE_PMGR_PS_ACTUAL, before),
+		 (unsigned int)FIELD_GET(APPLE_PMGR_PS_TARGET, before),
+		 !!(before & APPLE_PMGR_AUTO_ENABLE));
+	if (FIELD_GET(APPLE_PMGR_PS_TARGET, before) != APPLE_PMGR_PS_ACTIVE)
+		return -EINVAL;
+	if (!(before & APPLE_PMGR_AUTO_ENABLE))
+		return FIELD_GET(APPLE_PMGR_PS_ACTUAL, before) == APPLE_PMGR_PS_ACTIVE ? 0 : -EINVAL;
+
+	ret = apple_pmgr_ps_set(&ps->genpd, APPLE_PMGR_PS_ACTIVE, false);
+	if (!ret) {
+		ret = regmap_read(ps->regmap, ps->offset, &after);
+		if (!ret && ((after & APPLE_PMGR_AUTO_ENABLE) ||
+		    FIELD_GET(APPLE_PMGR_PS_ACTUAL, after) != APPLE_PMGR_PS_ACTIVE ||
+		    FIELD_GET(APPLE_PMGR_PS_TARGET, after) != APPLE_PMGR_PS_ACTIVE))
+			ret = -EIO;
+	}
+	if (!ret)
+		return 0;
+
+	restore = regmap_update_bits(ps->regmap, ps->offset,
+				     APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
+				     before & APPLE_PMGR_AUTO_ENABLE);
+	if (restore < 0) {
+		dev_err(ps->dev, "experimental AFR hold: auto-PM restore failed: %d\n", restore);
+		return restore;
+	}
+	return ret;
+}
+#endif
 
 /*
  * genpd keeps a domain off when ->power_on() fails and on when ->power_off()
@@ -312,6 +465,9 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	int ret;
 	const char *name;
 	bool active;
+#if IS_ENABLED(CONFIG_APPLE_T6034_GPU_DIAG_NO_AUTO)
+	bool diag_afr;
+#endif
 
 	regmap = syscon_node_to_regmap(node->parent);
 	if (IS_ERR(regmap))
@@ -350,9 +506,13 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	ps->firmware_owned = of_property_read_bool(node, "apple,firmware-owned");
 
 	ret = of_property_read_u32(node, "apple,min-state", &ps->min_state);
-	if (ret == 0 && ps->min_state <= APPLE_PMGR_PS_ACTIVE && !ps->firmware_owned)
-		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_PS_MIN,
-				   FIELD_PREP(APPLE_PMGR_PS_MIN, ps->min_state));
+	if (ret == 0 && ps->min_state <= APPLE_PMGR_PS_ACTIVE && !ps->firmware_owned) {
+		ret = apple_pmgr_ps_program_min(ps);
+		if (ret) {
+			dev_err(dev, "cannot set minimum power state: %d\n", ret);
+			return ret;
+		}
+	}
 
 	if (of_property_read_bool(node, "apple,force-disable"))
 		ps->force_disable = true;
@@ -368,8 +528,29 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	 * gated automatically behind its back: keep it at the requested state.
 	 */
 	ps->no_auto_pm = of_property_read_bool(node, "apple,no-auto-pm");
+#if IS_ENABLED(CONFIG_APPLE_T6034_GPU_DIAG_NO_AUTO)
+	if (t6034_gpu_diag_domain(node, ps->offset)) {
+		ps->no_auto_pm = true;
+		dev_warn(dev, "experimental J514M GPU diagnostic: automatic gating disabled\n");
+	}
+	diag_afr = t6034_gpu_diag_afr_domain(node, ps->offset);
+#endif
 
-	active = apple_pmgr_ps_is_active(ps);
+	ret = apple_pmgr_ps_is_active(ps, &active);
+	if (ret) {
+		dev_err(dev, "cannot read initial power state: %d\n", ret);
+		return ret;
+	}
+#if IS_ENABLED(CONFIG_APPLE_T6034_GPU_DIAG_NO_AUTO)
+	if (diag_afr) {
+		ret = t6034_gpu_diag_hold_afr(ps);
+		if (ret)
+			return ret;
+		active = true;
+		ps->no_auto_pm = true;
+		dev_warn(dev, "experimental J514M AFR hold: shared domain kept active\n");
+	}
+#endif
 	if (ps->firmware_owned) {
 		/* Consumers (the boot framebuffer) need it; never try to turn it on. */
 		if (!active)
@@ -399,9 +580,13 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	}
 
 	/* Turn on auto-PM if the domain is already on, unless it must stay off */
-	if (active && !ps->firmware_owned)
-		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
-				   ps->no_auto_pm ? 0 : APPLE_PMGR_AUTO_ENABLE);
+	if (active && !ps->firmware_owned) {
+		ret = apple_pmgr_ps_program_auto(ps);
+		if (ret) {
+			dev_err(dev, "cannot configure automatic power management: %d\n", ret);
+			return ret;
+		}
+	}
 
 	ret = pm_genpd_init(&ps->genpd, NULL, !active);
 	if (ret < 0) {

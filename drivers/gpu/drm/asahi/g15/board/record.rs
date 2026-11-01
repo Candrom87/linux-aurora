@@ -181,6 +181,32 @@ pub(crate) struct IoSlot {
     pub(crate) writable: bool,
 }
 
+impl IoSlot {
+    /// The record must describe only bytes covered by the firmware mapping.
+    pub(crate) fn from_mapping(
+        slot: u8, pa: u64, va: u64, map_bytes: u64, delta: u64,
+        total: u32, element: u32, writable: bool,
+    ) -> R<Self> {
+        if total == 0 || element == 0 || element > total {
+            return Err("IOMapping has invalid record sizes");
+        }
+        let end = delta.checked_add(u64::from(total)).ok_or("IOMapping extent overflows")?;
+        if end > map_bytes {
+            return Err("IOMapping record exceeds mapped window");
+        }
+        pa.checked_add(end).ok_or("IOMapping physical extent overflows")?;
+        va.checked_add(end).ok_or("IOMapping virtual extent overflows")?;
+        Ok(Self {
+            slot,
+            pa: pa.checked_add(delta).ok_or("IOMapping physical address overflows")?,
+            va: va.checked_add(delta).ok_or("IOMapping virtual address overflows")?,
+            total,
+            element,
+            writable,
+        })
+    }
+}
+
 /// Everything the record is built from.
 pub(crate) struct Inputs<'a> {
     pub(crate) props: [u32; PROPS.len()],
@@ -201,14 +227,16 @@ pub(crate) struct Inputs<'a> {
     pub(crate) timestamps: u64,
     /// The six sensor rows of the ADT's `aon-ptd` table ([`sensor_rows`]).
     pub(crate) sensor_rows: [[u8; 12]; SENSOR_ROW_COUNT],
-    /// The words neither the device tree nor the ADT carries.
+    /// The measured chip identity and words neither the device tree nor the ADT carries.
     pub(crate) reference: &'a Reference,
 }
 
-/// The record's words that neither the device tree nor the ADT carries, as one machine's
-/// driver wrote them ([`REFERENCE_WORDS`]).
+/// The measured chip identity and record words that neither the device tree nor the ADT
+/// carries, as one machine's driver wrote them ([`REFERENCE_WORDS`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Reference {
+    /// Chip identity recorded by the measured board profile.
+    pub(crate) chip_id: u32,
     /// The maximum GPU power in mW ([`MAX_POWER`]).
     pub(crate) max_power_mw: u32,
     /// The relative powers of DVFS states 1..7, percent of the top state's (state 8 is 100).
@@ -219,6 +247,12 @@ pub(crate) struct Reference {
     pub(crate) alarm_mask: u64,
 }
 
+impl Reference {
+    pub(crate) fn matches_chip(&self, chip_id: u32) -> bool {
+        self.chip_id == chip_id
+    }
+}
+
 /// DVFS states with a relative-power word of their own.
 pub(crate) const RELATIVE_STATES: usize = 7;
 
@@ -226,6 +260,7 @@ pub(crate) const RELATIVE_STATES: usize = 7;
 /// Another J516C gets them as a J514S gets the T6030 templates' machine's: the operating
 /// points, voltages, gains and sensor rows are its own, these are the reference machine's.
 pub(crate) const J516C: Reference = Reference {
+    chip_id: 0x6031,
     max_power_mw: 116739,
     relative_power: [11, 23, 33, 44, 55, 71, 90],
     fast_die_mask: 0x802a002b_802a002b,
@@ -242,7 +277,8 @@ const ALARM_MASK: usize = HWDATA_A + 0x24a8;
 /// The record words [`Reference`] supplies. Record offsets.
 #[cfg(test)]
 #[rustfmt::skip]
-pub(crate) const REFERENCE_WORDS: [usize; 14] = [
+pub(crate) const REFERENCE_WORDS: [usize; 15] = [
+    0xa28,
     0x1060, 0x1064, 0x1068, 0x106c, 0x1070, 0x1074, 0x1078,
     MAX_POWER,
     FAST_DIE_MASK, FAST_DIE_MASK + 4,
@@ -365,6 +401,13 @@ pub(crate) fn tables(main: &[Opp]) -> R<Tables> {
     if main.len() < 2 || main.len() > u8::MAX as usize {
         return Err("operating points: fewer than 2 or more than 255");
     }
+    let cells = main[0].cells;
+    if cells == 0 || cells > CLUSTERS || main.iter().any(|s| s.cells != cells) {
+        return Err("operating points: invalid or inconsistent voltage lanes");
+    }
+    if main[1..].iter().any(|s| s.mv[..cells].contains(&0)) {
+        return Err("operating points: active state has a zero voltage");
+    }
     if main[0].mhz != 0 || main[1..].iter().any(|s| s.mhz == 0) {
         return Err("operating points: state 0 is not the only 0 MHz state");
     }
@@ -440,10 +483,16 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
     put64(out, 0x18, i.usc_base)?;
     put64(out, 0x20, i.user_end)?;
     put64(out, 0x28, i.timestamps)?;
+    let mut mapped_slots = 0u32;
     for s in i.slots {
         if s.slot as usize >= IOMAP_SLOTS {
             return Err("IOMapping slot past the table");
         }
+        let bit = 1u32 << s.slot;
+        if mapped_slots & bit != 0 {
+            return Err("IOMapping slot appears more than once");
+        }
+        mapped_slots |= bit;
         let r = IOMAPS + 32 * s.slot as usize;
         put64(out, r, s.pa)?;
         put64(out, r + 8, s.va)?;
@@ -458,7 +507,7 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         put32(out, IOMAPS + 32 * slot as usize + 0x18, 1)?;
     }
     // Identity and flags.
-    put32(out, 0xa28, 0x6031)?;
+    put32(out, 0xa28, i.reference.chip_id)?;
     put32(out, 0xa2c, 1)?;
     put32(out, 0xa30, 2)?;
     for at in [0xa38, 0xa3c, 0xa40, 0xa50, 0xa58, 0xa60] {
@@ -491,7 +540,7 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         .main
         .get(base_index)
         .ok_or("perf-base-pstate past the states")?;
-    if t.primary[base_index] as usize != base_index {
+    if t.primary.get(base_index).copied().map(usize::from) != Some(base_index) {
         return Err("perf-base-pstate is not its own table-A entry");
     }
     if top.mhz <= base.mhz {
@@ -929,6 +978,7 @@ mod tests {
 
     /// Arbitrary reference words, distinct from the J516C's.
     const TEST_REFERENCE: Reference = Reference {
+        chip_id: 0x6031,
         max_power_mw: 54321,
         relative_power: [0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006],
         fast_die_mask: 0x1111_2222_3333_4444,
@@ -1048,6 +1098,50 @@ mod tests {
         let mut bad = main.clone();
         bad[13].mv[3] = 915;
         assert!(tables(&bad).is_err());
+        for cells in [0, CLUSTERS + 1] {
+            let mut bad = main.clone();
+            bad[0].cells = cells;
+            assert!(tables(&bad).is_err());
+        }
+        let mut bad = main.clone();
+        bad[2].cells = 1;
+        assert!(tables(&bad).is_err());
+        let mut bad = main.clone();
+        bad[2].mv[0] = 0;
+        assert!(tables(&bad).is_err());
+    }
+
+    #[test]
+    fn record_rejects_duplicate_slots_and_out_of_range_base() {
+        let mut main = main_opps();
+        let cs = [opp(24, [635, 0, 0, 0])];
+        let slot = IoSlot { slot: 1, pa: 0x1000, va: 0x2000, total: 0x1000,
+                            element: 0x1000, writable: false };
+        let duplicate = [slot, slot];
+        let i = inputs(&main, &cs, &duplicate);
+        let mut out = vec![0; SIZE];
+        assert_eq!(build(&mut out, &i), Err("IOMapping slot appears more than once"));
+
+        // An input state exists but its index lies beyond the grouped-table array.
+        main.resize(18, *main.last().unwrap());
+        let mut i = inputs(&main, &cs, &[]);
+        i.props[BASE_PSTATE] = 16;
+        assert_eq!(build(&mut out, &i), Err("perf-base-pstate is not its own table-A entry"));
+    }
+
+    #[test]
+    fn iomapping_record_must_fit_window() {
+        let mk = |pa, va, size, delta, total, element| {
+            IoSlot::from_mapping(1, pa, va, size, delta, total, element, false)
+        };
+        assert_eq!(mk(0x1000, 0x2000, 0x200, 0x100, 0x100, 0x100).unwrap().pa, 0x1100);
+        assert!(mk(0x1000, 0x2000, 0x1ff, 0x100, 0x100, 0x100).is_err());
+        assert!(mk(0x1000, 0x2000, 0x200, 0x100, 0, 1).is_err());
+        assert!(mk(0x1000, 0x2000, 0x200, 0x100, 1, 0).is_err());
+        assert!(mk(0x1000, 0x2000, 0x200, 0x100, 1, 2).is_err());
+        assert!(mk(u64::MAX - 1, 0x2000, 2, 0, 2, 1).is_err());
+        assert!(mk(0x1000, u64::MAX - 1, 2, 0, 2, 1).is_err());
+        assert!(mk(0x1000, 0x2000, u64::MAX, u64::MAX, 1, 1).is_err());
     }
 
     #[test]
@@ -1085,6 +1179,14 @@ mod tests {
         let mut r = vec![0x5au8; SIZE];
         build(&mut r, &i).unwrap();
         let good = r.clone();
+        assert!(J516C.matches_chip(0x6031));
+        assert!(!J516C.matches_chip(0x6034));
+        let different_chip = Reference { chip_id: 0x6034, ..TEST_REFERENCE };
+        let mut hypothetical = inputs(&main, &cs, &slots);
+        hypothetical.reference = &different_chip;
+        build(&mut r, &hypothetical).unwrap();
+        assert_eq!(get(&r, 0xa28), 0x6034);
+        r.copy_from_slice(&good);
         // The reference words: relative powers of states 1..7, the maximum power, the masks.
         for k in 0..RELATIVE_STATES {
             assert_eq!(get(&r, 0x1060 + 4 * k), 0x1000 + k as u32);

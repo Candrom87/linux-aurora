@@ -144,7 +144,7 @@ static int gt_live_soc __initdata = -1;
 struct gate_test {
 	const struct gt_soc *s;
 	struct of_changeset cs;	/* this case's own edits to the test tree */
-	bool requested, t6031_requested;
+	bool requested, t6031_requested, t6034_requested;
 	int t6031_switch;
 	const char *t6031_board;
 };
@@ -396,6 +396,7 @@ static int __init gt_init(struct kunit *test, const struct gt_soc *s)
 	/* As the boot left them: the test kernel's command line sets neither. */
 	t->requested = gate_requested;
 	t->t6031_requested = gate_t6031_requested;
+	t->t6034_requested = gate_t6034_requested;
 	t->t6031_switch = gate_t6031_switch;
 	t->t6031_board = gate_t6031_board;
 	of_changeset_init(&t->cs);
@@ -405,6 +406,7 @@ static int __init gt_init(struct kunit *test, const struct gt_soc *s)
 	gate_pmp_reused = false;
 	gate_requested = true;
 	gate_t6031_requested = false;
+	gate_t6034_requested = false;
 	gate_t6031_switch = -1;
 	if (gt_live_soc)
 		kunit_skip(test, "the booted device tree has its own /soc");
@@ -451,12 +453,105 @@ static void __init gt_exit(struct kunit *test)
 	gate_pmp_values = NULL;
 	gate_requested = t->requested;
 	gate_t6031_requested = t->t6031_requested;
+	gate_t6034_requested = t->t6034_requested;
 	gate_t6031_switch = t->t6031_switch;
 	gate_t6031_board = t->t6031_board;
 	gate_soc = NULL;
 }
 
 /* T6031 */
+
+/* Reuse the T6031 fixture only as a synthetic T6034-shaped tree. */
+static void __init gt_t6034_tree(struct kunit *test, const char *board)
+{
+	gt_set_string(test, "/", "compatible", board);
+	gt_set_string(test, gt_t6031.dcp, "compatible", "apple,t6034-dcp");
+	gt_set_string(test, gt_t6031.display, "compatible", "apple,t6034-display-subsystem");
+	gt_add_u32(test, gt_t6031.dcp, "apple,t6034-handoff", 1);
+	gt_add_u32(test, gt_t6031.display, "apple,t6034-handoff", 1);
+	gate_soc = &gate_t6034;
+}
+
+static void __init gate_t6034_off_by_default(struct kunit *test)
+{
+	gt_t6034_tree(test, "apple,j514m");
+	gt_run(test);
+	gt_expect_untouched(test);
+}
+
+static void __init gate_t6034_wrong_board(struct kunit *test)
+{
+	gt_t6034_tree(test, "apple,j516m");
+	KUNIT_ASSERT_EQ(test, gate_setup_t6034("1"), 0);
+	gt_run(test);
+	gt_expect_untouched(test);
+}
+
+static void __init gate_t6034_no_pmp_values(struct kunit *test)
+{
+	struct gate_test *t = test->priv;
+	struct device_node *np[GATE_NR_NODES] = {};
+	struct device_node *ps[PMP_PS_NR] = {};
+	struct device_node *aic = NULL;
+	int ret, i;
+
+	gt_t6034_tree(test, "apple,j514m");
+	KUNIT_ASSERT_EQ(test, gate_setup_t6034("1"), 0);
+	KUNIT_ASSERT_EQ(test, of_changeset_apply(&t->cs), 0);
+	ret = gate_resolve(np);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (!ret)
+		KUNIT_EXPECT_EQ(test, gate_pmp_resolve(np, ps, &aic), -ENODEV);
+	of_node_put(aic);
+	for (i = 0; i < PMP_PS_NR; i++)
+		of_node_put(ps[i]);
+	for (i = 0; i < GATE_NR_NODES; i++)
+		of_node_put(np[i]);
+	gate_run();
+	gt_expect_untouched(test);
+}
+
+/* Invented values: only exercise the control flow, never claim board calibration. */
+static void __init gt_t6034_pmp_values(struct kunit *test)
+{
+	struct gate_test *t = test->priv;
+	struct device_node *node;
+	u32 data[] = { 1, 2 };
+	int ret;
+
+	node = of_changeset_create_node(&t->cs, gt_node(test, "/chosen"), "asahi,t6034-pmp");
+	KUNIT_ASSERT_NOT_NULL(test, node);
+	ret = of_changeset_add_prop_u32(&t->cs, node, "apple,board-id", 0x1234);
+	if (!ret)
+		ret = of_changeset_add_prop_u32(&t->cs, node, "apple,dram-vendor-id", 5);
+	if (!ret)
+		ret = of_changeset_add_prop_string(&t->cs, node, "apple,tunable-uuid",
+						   gt_t6031.pmp_uuid);
+	if (!ret)
+		ret = of_changeset_add_prop_u32_array(&t->cs, node, "apple,tunable-test",
+						      data, ARRAY_SIZE(data));
+	of_node_put(node);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+}
+
+static void __init gate_t6034_synthetic_handoff(struct kunit *test)
+{
+	gt_t6034_tree(test, "apple,j514m");
+	gt_t6034_pmp_values(test);
+	KUNIT_ASSERT_EQ(test, gate_setup_t6034("1"), 0);
+	gt_run(test);
+	gt_expect_enabled(test);
+}
+
+static void __init gate_t6034_no_inherited_power(struct kunit *test)
+{
+	gt_t6034_tree(test, "apple,j514m");
+	gt_t6034_pmp_values(test);
+	gt_remove(test, gt_t6031.ps[PMP_PS_DISP_SYS], "apple,inherited-on");
+	KUNIT_ASSERT_EQ(test, gate_setup_t6034("1"), 0);
+	gt_run(test);
+	gt_expect_untouched(test);
+}
 
 /* The boot defaults, and the T6031 switch apart from the others. */
 static void __init gate_t6031_param(struct kunit *test)
@@ -887,6 +982,11 @@ static void __init gate_t8122_enabled_again(struct kunit *test)
 
 /* The case and suite structs outlive init: only the functions are init code. */
 static struct kunit_case gate_t6031_cases[] __refdata = {
+	KUNIT_CASE(gate_t6034_off_by_default),
+	KUNIT_CASE(gate_t6034_wrong_board),
+	KUNIT_CASE(gate_t6034_no_pmp_values),
+	KUNIT_CASE(gate_t6034_synthetic_handoff),
+	KUNIT_CASE(gate_t6034_no_inherited_power),
 	KUNIT_CASE(gate_t6031_param),
 	KUNIT_CASE(gate_t6031_resolution),
 	KUNIT_CASE(gate_t6031_off_by_default),

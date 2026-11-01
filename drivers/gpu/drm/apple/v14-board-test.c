@@ -51,6 +51,7 @@ static const struct dcp_v14_board *board_for(const char *dcp, const char *const 
 
 static const char *const j516c[] = { "apple,j516c", "apple,t6031", "apple,arm-platform", NULL };
 static const char *const j514c[] = { "apple,j514c", "apple,t6031", "apple,arm-platform", NULL };
+static const char *const j514m[] = { "apple,j514m", "apple,t6034", "apple,arm-platform", NULL };
 static const char *const j516m[] = { "apple,j516m", "apple,t6034", "apple,arm-platform", NULL };
 static const char *const j516s[] = { "apple,j516s", "apple,t6030", "apple,arm-platform", NULL };
 static const char *const j613[] = { "apple,j613", "apple,t8122", "apple,arm-platform", NULL };
@@ -118,6 +119,58 @@ static void v14_board_t6031_other_boards(struct kunit *test)
 	/* Not a 14.x internal DCP at all. */
 	KUNIT_EXPECT_NULL(test, board_for("apple,t8112-dcp", j516c, &known));
 	KUNIT_EXPECT_FALSE(test, known);
+}
+
+static void v14_board_j514m(struct kunit *test)
+{
+	const struct dcp_v14_board *b;
+	u32 height;
+	bool known;
+
+	b = board_for("apple,t6034-dcp", j514m, &known);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t6034-handoff");
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, NULL));
+	KUNIT_EXPECT_EQ(test, b->panel_width, 3024);
+	KUNIT_EXPECT_EQ(test, b->panel_height, 1964);
+	/* Both the cropped and full boot framebuffers describe the same panel. */
+	KUNIT_ASSERT_TRUE(test, dcp_v14_panel_height(b, 1890, 74, &height));
+	KUNIT_EXPECT_EQ(test, height, 1964U);
+	KUNIT_ASSERT_TRUE(test, dcp_v14_panel_height(b, 1964, 74, &height));
+	KUNIT_EXPECT_EQ(test, height, 1964U);
+	KUNIT_EXPECT_FALSE(test, dcp_v14_panel_height(b, U32_MAX, 74, &height));
+	KUNIT_EXPECT_TRUE(test, b->promotion);
+	KUNIT_EXPECT_TRUE(test, b->boot_timing_unqualified);
+	KUNIT_EXPECT_TRUE(test, b->experimental_timed_swaps);
+	KUNIT_EXPECT_TRUE(test, b->experimental_timing_request);
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_requests_120(b, false, false, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_requests_120(b, true, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_requests_120(b, false, true, 60));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_requests_120(NULL, false, true, 120));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_requests_120(b, false, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_requests_120(
+		board_for("apple,t6031-dcp", j516c, &known), false, true, 120));
+	/* The experiment can reach 120 even if firmware prefers 60. */
+	KUNIT_EXPECT_TRUE(test, dcp_v14_choose_timing(b, true, 120, false, true, 60));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_choose_timing(b, true, 60, true, true, 120));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_choose_timing(b, true, 60, false, false, 0));
+	/* With the switch off, preserve the firmware-preferred ordering. */
+	KUNIT_EXPECT_FALSE(test, dcp_v14_choose_timing(b, false, 120, false, true, 60));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_choose_timing(b, false, 60, true, true, 120));
+	KUNIT_EXPECT_FALSE(test, b->swap_timestamps);
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(b, false, false, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(b, false, true, 60));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(b, true, true, 120));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(b, false, true, 120));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_allows_vrr(b, false));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_allows_vrr(b, true));
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j516m, &known));
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514m, &known));
+	KUNIT_EXPECT_TRUE(test, known);
 }
 
 /* The DCP image the record admits: this Mac's own, exactly. */
@@ -200,14 +253,14 @@ static void v14_board_swap_timestamps(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, t6030_b->swap_timestamps);
 	KUNIT_EXPECT_FALSE(test, j613_b->swap_timestamps);
 
-	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(j516c_b, false));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(j516c_b, false, false, 0));
 	/* The J514C, the external role, the T6030 (J514S, J516S) and T8122 panels, no record. */
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j514c_b, false));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j516c_b, true));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(t6030_b, false));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j613_b, false));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(NULL, false));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(NULL, true));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j514c_b, false, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j516c_b, true, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(t6030_b, false, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j613_b, false, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(NULL, false, true, 120));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(NULL, true, true, 120));
 }
 
 /*
@@ -252,14 +305,25 @@ static void v14_swap_timestamps_encoding(struct kunit *test)
 	}
 }
 
+static void v14_swap_interval_buckets(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, dcp_v14_swap_interval_bucket(0), 0U);
+	KUNIT_EXPECT_EQ(test, dcp_v14_swap_interval_bucket(12 * NSEC_PER_MSEC - 1), 0U);
+	KUNIT_EXPECT_EQ(test, dcp_v14_swap_interval_bucket(12 * NSEC_PER_MSEC), 1U);
+	KUNIT_EXPECT_EQ(test, dcp_v14_swap_interval_bucket(20 * NSEC_PER_MSEC), 2U);
+	KUNIT_EXPECT_EQ(test, dcp_v14_swap_interval_bucket(50 * NSEC_PER_MSEC), 3U);
+}
+
 static struct kunit_case v14_board_cases[] = {
 	KUNIT_CASE(v14_board_j516c),
 	KUNIT_CASE(v14_board_j514c),
+	KUNIT_CASE(v14_board_j514m),
 	KUNIT_CASE(v14_board_t6031_other_boards),
 	KUNIT_CASE(v14_board_j516c_image),
 	KUNIT_CASE(v14_board_unchanged),
 	KUNIT_CASE(v14_board_swap_timestamps),
 	KUNIT_CASE(v14_swap_timestamps_encoding),
+	KUNIT_CASE(v14_swap_interval_buckets),
 	{}
 };
 

@@ -153,6 +153,8 @@ static int gate_t6031_switch __initdata = -1;
 static const char *gate_t6031_board __initdata = "apple,j516c";
 /* The resolved request, set by gate_run() on a T6031. */
 static bool gate_t6031_requested __initdata;
+/* Experimental J514M path: no board gets a default-on request. */
+static bool gate_t6034_requested __initdata;
 
 /* Whether the T6031 native display is requested: an explicit 0 or 1 wins. */
 static bool __init gate_t6031_wanted(int sw, bool default_board)
@@ -284,10 +286,34 @@ static const struct gate_soc gate_t6031 __initconst = {
 	.fw_uuids = "asahi,t6031-fw-uuids",
 };
 
+/* J514M only; the handoff and power chain still require hardware validation. */
+static const struct gate_soc gate_t6034 __initconst = {
+	.machine = "apple,t6034",
+	.prefix = "apple-t6034-display: ",
+	.name = "T6034",
+	.dcp_compat = "apple,t6034-dcp",
+	.display_compat = "apple,t6034-display-subsystem",
+	.marker = "apple,t6034-handoff",
+	.pwrstate_compat = "apple,t6031-pmgr-pwrstate",
+	.dcp_full_name = "dcp@386c00000",
+	.pmp_values = "/chosen/asahi,t6034-pmp",
+	.pmp_uuid = gate_t6031_pmp_uuid,
+	.report_compat = "apple,t6031-pmp-v2-report",
+	.disp_entry = "report@10",
+	.reuse_pmp = true,
+	.pmp_compat = "apple,t6031-pmp-v2",
+	.ans_entry = "report@21",
+	.requested = &gate_t6034_requested,
+	.opt_in = "apple_t6034_display.enable=1",
+	.ps_chain = { PMP_PS_DISP_FE, PMP_PS_DISP_CPU, PMP_PS_DISP_SYS },
+	.pmp_ps_any_pmgr = true,
+};
+
 static const struct gate_soc *const gate_socs[] __initconst = {
 	&gate_t6030,
 	&gate_t8122,
 	&gate_t6031,
+	&gate_t6034,
 };
 
 /* The SoC this boot runs on, if the gate serves it. */
@@ -359,6 +385,12 @@ static int __init gate_setup_t6031(char *arg)
 	return ret;
 }
 early_param("apple_t6031_display.enable", gate_setup_t6031);
+
+static int __init gate_setup_t6034(char *arg)
+{
+	return kstrtobool(arg, &gate_t6034_requested);
+}
+early_param("apple_t6034_display.enable", gate_setup_t6034);
 
 /* Returns the only node compatible with @compat, or NULL if there are none or several. */
 static struct device_node *__init gate_find_one(const char *compat)
@@ -1967,6 +1999,11 @@ static void __init gate_run(void)
 	bool panel = false;
 	int i;
 
+	if (gate_soc == &gate_t6034 && !of_machine_is_compatible("apple,j514m")) {
+		gate_info("unsupported board, display stays on the boot framebuffer\n");
+		return;
+	}
+
 	if (gate_soc->describe)
 		gate_describe();
 
@@ -1980,7 +2017,7 @@ static void __init gate_run(void)
 	}
 
 	if (!*gate_soc->requested) {
-		if (gate_soc->opt_in && gate_t6031_switch < 0)
+		if (gate_soc == &gate_t6034 || (gate_soc->opt_in && gate_t6031_switch < 0))
 			gate_info("native display not requested (%s is not on the command line), display stays on the boot framebuffer\n",
 				  gate_soc->opt_in);
 		else

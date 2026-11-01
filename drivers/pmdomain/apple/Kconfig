@@ -25,6 +25,18 @@ config APPLE_PMGR_PWRSTATE_KUNIT_TEST
 	  driver's power callbacks against an emulated power state register
 	  and need no Apple hardware.
 
+config APPLE_T6034_GPU_DIAG_NO_AUTO
+	bool "Experimental J514M GPU diagnostic power option"
+	depends on ARCH_APPLE && APPLE_PMGR_PWRSTATE
+	default n
+	help
+	  Add default-off boot options for a J514M GPU power diagnostic. One
+	  disables automatic gating of the GPU domain. A second, independently
+	  required option can hold the shared AFR parent active for the entire
+	  boot. Both require the matching board and power-register layout.
+	  These changes are unvalidated on hardware, can affect other devices,
+	  and are not a production GPU driver. A recoverable test boot is essential.
+
 config APPLE_PMP_REPORT
 	bool "Apple PMP report control"
 	depends on OF

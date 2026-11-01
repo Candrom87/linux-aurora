@@ -7,6 +7,7 @@
 #include <linux/build_bug.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/time64.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
 
@@ -175,6 +176,18 @@ static inline void dcp_v14_encode_swap(u8 *swap, u32 id, u32 background, const u
  * dcp_v14_encode_swap(), which zeroes the record.
  */
 #define DCP_V14_SWAP_TIMESTAMP_VALUE	120
+
+/* Callback intervals, not a measurement of physical scanout refresh. */
+static inline unsigned int dcp_v14_swap_interval_bucket(u64 ns)
+{
+	if (ns < 12 * NSEC_PER_MSEC)
+		return 0;
+	if (ns < 20 * NSEC_PER_MSEC)
+		return 1;
+	if (ns < 50 * NSEC_PER_MSEC)
+		return 2;
+	return 3;
+}
 
 static inline void dcp_v14_swap_timestamps(u8 *swap)
 {

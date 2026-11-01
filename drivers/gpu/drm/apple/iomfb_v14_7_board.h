@@ -4,6 +4,7 @@
 #define __APPLE_IOMFB_V14_7_BOARD_H__
 
 #include <linux/types.h>
+#include <linux/overflow.h>
 
 /*
  * What differs between the internal panels the 14.x IOMFB drives. The T6030
@@ -27,6 +28,10 @@ struct dcp_v14_board {
 	u32 panel_width, panel_height;
 	/* The panel may have a 120 Hz timing besides 60 Hz. */
 	bool promotion;
+	/* Until this board's V14 adaptive-sync path is implemented and tested. */
+	bool vrr_unqualified;
+	/* The internal firmware's boot timing has not been measured on this board. */
+	bool boot_timing_unqualified;
 	/*
 	 * Log what the first boots of a new board are judged by, not only with
 	 * debugging on: every panel timing the firmware offers, and the display
@@ -51,6 +56,10 @@ struct dcp_v14_board {
 	 * 16.7 ms, so a 120 Hz panel presents at 60 fps.
 	 */
 	bool swap_timestamps;
+	/* Unqualified timing experiment, requiring an explicit test switch. */
+	bool experimental_timed_swaps;
+	/* An unqualified internal timing RPC can be requested explicitly. */
+	bool experimental_timing_request;
 	/* This board has a qualified panel level block; machine admission is separate. */
 	bool panel_nits;
 };
@@ -78,6 +87,46 @@ bool dcp_v14_board_admits(const struct dcp_v14_board *board, const char *uuid);
  * record asks for them. External processors (@external, no record) and every
  * other board send zero timestamps.
  */
-bool dcp_v14_board_stamps_swaps(const struct dcp_v14_board *board, bool external);
+bool dcp_v14_board_stamps_swaps(const struct dcp_v14_board *board, bool external,
+				bool experiment, unsigned int advertised_hz);
+
+/* Reconstruct the full height from a cropped or full-height boot framebuffer. */
+static inline bool dcp_v14_panel_height(const struct dcp_v14_board *board,
+					u32 fb_height, u32 notch, u32 *height)
+{
+	if (board->panel_height && notch && fb_height == board->panel_height) {
+		*height = fb_height;
+		return true;
+	}
+	return !check_add_overflow(fb_height, notch, height);
+}
+
+static inline bool dcp_v14_board_allows_vrr(const struct dcp_v14_board *board,
+					    bool requested)
+{
+	return !requested || !board || !board->vrr_unqualified;
+}
+
+static inline bool dcp_v14_board_requests_120(const struct dcp_v14_board *board,
+					      bool external, bool experiment, unsigned int hz)
+{
+	return board && board->experimental_timing_request && !external && experiment && hz == 120;
+}
+
+/* For the experiment, prefer an advertised 120 Hz mode over a preferred
+ * 60 Hz mode. Otherwise preserve the existing preferred-mode ordering. */
+static inline bool dcp_v14_choose_timing(const struct dcp_v14_board *board, bool experiment,
+					 unsigned int hz, bool preferred,
+					 bool have_best, unsigned int best_hz)
+{
+	bool candidate_120 = dcp_v14_board_requests_120(board, false, experiment, hz);
+	bool best_120 = dcp_v14_board_requests_120(board, false, experiment, best_hz);
+
+	if (!have_best)
+		return true;
+	if (candidate_120 != best_120)
+		return candidate_120;
+	return preferred;
+}
 
 #endif /* __APPLE_IOMFB_V14_7_BOARD_H__ */

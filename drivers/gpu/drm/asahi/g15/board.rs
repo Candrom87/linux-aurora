@@ -117,6 +117,15 @@ pub(crate) fn hardware_record(
     adt: &GpuAdt,
     reference: &record::Reference,
 ) -> Result<KVVec<u8>> {
+    if !reference.matches_chip(cfg.chip_id) {
+        dev_err!(
+            dev,
+            "GPU reference chip {:#x} does not match config {:#x}\n",
+            reference.chip_id,
+            cfg.chip_id
+        );
+        return Err(EINVAL);
+    }
     let layout = cfg.layout;
     let node = dev.of_node().ok_or(ENODEV)?;
     let mut props = [0u32; record::PROPS.len()];
@@ -141,21 +150,22 @@ pub(crate) fn hardware_record(
     let mut afr = [record::Opp::default(); 8];
     let ncs = aux_opps(dev, &node, c_str!("apple,cs-opp"), &mut cs)?;
     let nafr = aux_opps(dev, &node, c_str!("apple,afr-opp"), &mut afr)?;
-    if layout.record_slots.len() != layout.iomaps.len() {
+    if layout.record_slots.len() != layout.iomaps.len()
+        || layout.iomaps.len() > record::IOMAP_SLOTS
+    {
         return Err(EINVAL);
     }
     let mut slots = [record::IoSlot::default(); record::IOMAP_SLOTS];
     for (k, (map, &(total, element, writable))) in
         layout.iomaps.iter().zip(layout.record_slots).enumerate()
     {
-        slots[k] = record::IoSlot {
-            slot: map.slot,
-            pa: map.pa + map.delta,
-            va: map.va + map.delta,
-            total,
-            element,
-            writable,
-        };
+        slots[k] = record::IoSlot::from_mapping(
+            map.slot, map.pa, map.va, map.map_bytes, map.delta, total, element, writable,
+        )
+        .map_err(|why| {
+            dev_err!(dev, "GPU IOMapping {}: {}\n", k, why);
+            EINVAL
+        })?;
     }
     let inputs = record::Inputs {
         props,

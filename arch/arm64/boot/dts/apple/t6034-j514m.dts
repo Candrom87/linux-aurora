@@ -10,6 +10,7 @@
 /dts-v1/;
 
 #include "t6034.dtsi"
+#include "t6031-dcp.dtsi"
 #include "t603x-j514-j516.dtsi"
 
 / {
@@ -27,6 +28,72 @@
 
 &bluetooth0 {
 	brcm,board-type = "apple,texa";
+};
+
+/*
+ * The ADT supplies the engine aperture, ANE type and interrupt for ane0;
+ * the PMGR window is independently covered by the ADT's PMGR ranges. The
+ * H15 experimental diagnostic expects both windows. The five domain
+ * addresses and their parent links match this board's ADT, but power
+ * sequencing, DART streams and the firmware ABI remain unvalidated. Keep
+ * this node disabled and do not bind an older-generation driver.
+ */
+&soc {
+	ane_j514m: ane@3c8000000 {
+		compatible = "apple,t6034-ane";
+		reg-names = "engine", "pmgr";
+		reg = <0x3 0xc8000000 0x0 0x2000000>,
+		      <0x2 0x92280000 0x0 0x10000>;
+		apple,ane-type = <0xe0>;
+		power-domains = <&ps_ane_sys>, <&ps_ane_mpm>, <&ps_ane_cpu>,
+				<&ps_ane_td>, <&ps_ane_base>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 983 IRQ_TYPE_LEVEL_HIGH>;
+		status = "disabled";
+	};
+};
+
+/*
+ * Experimental description only. The J514M ADT covers the T6031 display
+ * register windows and reports matching DCP and DART interrupt numbers.
+ * Keep unique compatibles and disabled nodes until its handoff, power and
+ * firmware protocols have been validated on this board.
+ */
+&display {
+	compatible = "apple,t6034-display-subsystem";
+};
+
+&dcp {
+	compatible = "apple,t6034-dcp";
+};
+
+&dcp_mbox {
+	compatible = "apple,t6034-asc-mailbox", "apple,asc-mailbox-v4";
+};
+
+&dcp_dart {
+	compatible = "apple,t6034-dart", "apple,t8110-dart";
+};
+
+&disp0_dart {
+	compatible = "apple,t6034-dart", "apple,t8110-dart";
+};
+
+/* The T6031 inherited-power assertion has not been established on J514M. */
+&ps_disp_sys {
+	/delete-property/ apple,inherited-on;
+};
+
+&ps_disp_fe {
+	/delete-property/ apple,inherited-on;
+};
+
+&ps_disp_cpu {
+	/delete-property/ apple,inherited-on;
+};
+
+&pmp_report {
+	/delete-property/ apple,pmp;
 };
 
 &aop_audio {

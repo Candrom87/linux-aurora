@@ -55,6 +55,16 @@
 #define DCP_V14_J613_FIRMWARE_UUID "90F849E1-B422-367E-B389-50246F8DEC47" /* J613 */
 #define DCP_V14_J516C_FIRMWARE_UUID "F493F03E-CC40-3D89-9A08-5F259BA2B246" /* J516C */
 
+static bool j514m_timed_swaps;
+module_param(j514m_timed_swaps, bool, 0444);
+MODULE_PARM_DESC(j514m_timed_swaps,
+		 "J514M experimental 120 Hz swap timestamps; unvalidated and disabled by default");
+
+static bool j514m_request_120;
+module_param(j514m_request_120, bool, 0444);
+MODULE_PARM_DESC(j514m_request_120,
+		 "J514M experimental internal 120 Hz timing request; unvalidated and disabled by default");
+
 #define DCP_V14_CPU_CONTROL	0x44
 #define DCP_V14_CPU_STATUS	0x48
 #define DCP_V14_PMP_TIMEOUT	msecs_to_jiffies(30000)
@@ -183,12 +193,38 @@ static const struct dcp_v14_board dcp_v14_board_j514c = {
 	.log_bringup = true,
 };
 
+/*
+ * Experimental J514M. Its 14.7 ADT identifies the same DCP image as J516C;
+ * the panel timings and IOMFB behavior on this machine are not yet tested.
+ * Apple's model specification gives its native panel as 3024 by 1964; this
+ * also distinguishes a full-height boot framebuffer from a cropped one.
+ * A T6034-specific handoff marker and exact board/firmware match are
+ * required, and the board device tree keeps the display disabled.
+ */
+static const struct dcp_v14_board dcp_v14_board_j514m = {
+	.name = "J514M",
+	.debugfs = "dcp-j514m",
+	.dcp_compatible = "apple,t6034-dcp",
+	.machine = "apple,j514m",
+	.firmware_uuid = DCP_V14_J516C_FIRMWARE_UUID,
+	.handoff = "apple,t6034-handoff",
+	.panel_width = 3024,
+	.panel_height = 1964,
+	.promotion = true,
+	.vrr_unqualified = true,
+	.boot_timing_unqualified = true,
+	.experimental_timed_swaps = true,
+	.experimental_timing_request = true,
+	.log_bringup = true,
+};
+
 static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_t6030,
 	&dcp_v14_board_j613,
 	&dcp_v14_board_j615,
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
+	&dcp_v14_board_j514m,
 };
 
 struct dcp_v14_property {
@@ -269,6 +305,10 @@ struct apple_dcp_v14 {
 	u32 stride;
 	u32 fb_width, fb_height;
 	u32 panel_width, panel_height;
+	/* The selected advertised timing, not a measured panel refresh. */
+	u32 advertised_hz;
+	/* An RPC reply is not proof of a physical panel timing. */
+	bool j514m_timing_replied;
 	/* The panel's notch rows (apple,notch-height), hidden or not. */
 	u32 notch_rows;
 	u64 clock_rate;
@@ -291,6 +331,8 @@ struct apple_dcp_v14 {
 	struct drm_framebuffer *active_fb;
 	u64 swaps;
 	u64 swap_ns_max;
+	u64 last_fb_swap_ns;
+	u64 swap_interval_buckets[4];
 
 	/* Immutable probe admission: only the J514S/J516S internal panel. */
 	bool panel_nits;
@@ -1698,9 +1740,12 @@ const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
 	return board->name;
 }
 
-bool dcp_v14_board_stamps_swaps(const struct dcp_v14_board *board, bool external)
+bool dcp_v14_board_stamps_swaps(const struct dcp_v14_board *board, bool external,
+				bool experiment, unsigned int advertised_hz)
 {
-	return board && !external && board->swap_timestamps;
+	return board && !external &&
+	       (board->swap_timestamps ||
+		(board->experimental_timed_swaps && experiment && advertised_hz == 120));
 }
 
 bool iomfb_v14_7_base_edid(const struct apple_dcp *dcp)
@@ -1801,10 +1846,8 @@ static int dcp_v14_geometry(struct apple_dcp_v14 *v14)
 		return -EINVAL;
 	v14->notch_rows = notch;
 	v14->panel_width = v14->fb_width;
-	v14->panel_height = v14->fb_height + notch;
-	/* The boot loader kept the notch rows: the framebuffer is the whole panel. */
-	if (v14->board->panel_height && notch && v14->fb_height == v14->board->panel_height)
-		v14->panel_height = v14->fb_height;
+	if (!dcp_v14_panel_height(v14->board, v14->fb_height, notch, &v14->panel_height))
+		return -EINVAL;
 	/* A board with a known panel takes no other. */
 	if (v14->board->panel_width &&
 	    (v14->panel_width != v14->board->panel_width ||
@@ -2513,11 +2556,23 @@ static int dcp_v14_status_show(struct seq_file *m, void *unused)
 	fb = v14->active_fb;
 	seq_printf(m, "started %d\nfailed %d\nswaps %llu\nswap_max_us %llu\n",
 		   v14->started, v14->failed, v14->swaps, v14->swap_ns_max / NSEC_PER_USEC);
+	seq_printf(m, "advertised_hz %u\ntimed_swaps %d\nswap_intervals_lt12_lt20_lt50_ge50_ms %llu %llu %llu %llu\n",
+		   v14->advertised_hz,
+		   dcp_v14_board_stamps_swaps(v14->board, v14->external,
+					      j514m_timed_swaps, v14->advertised_hz),
+		   v14->swap_interval_buckets[0], v14->swap_interval_buckets[1],
+		   v14->swap_interval_buckets[2], v14->swap_interval_buckets[3]);
+	seq_printf(m, "j514m_timing_rpc_succeeded %d\n", v14->j514m_timing_replied);
 	seq_printf(m, "active_fb %u\nimported %d\n", fb ? fb->base.id : 0,
 		   fb && fb->obj[0]->import_attach);
 	seq_printf(m, "panel %ux%u\nboot_fb %ux%u stride %u\nclock %llu\n",
 		   v14->panel_width, v14->panel_height, v14->fb_width, v14->fb_height,
 		   v14->stride, v14->clock_rate);
+	/* A reported property, not proof of the panel's physical refresh. */
+	for (i = 0; i < v14->property_count; i++)
+		if (!strcmp(v14->properties[i].key, "DPTimingModeId"))
+			seq_printf(m, "dp_timing_property service %#x value %llu\n",
+				   v14->properties[i].service, v14->properties[i].value);
 	seq_printf(m, "backlight factor %#x updates %llu\n",
 		   v14->backlight_factor, v14->backlight_factor_updates);
 	seq_printf(m, "ctm valid %d disabled %d calls %llu setter %#x getter %#x\n",
@@ -2565,8 +2620,10 @@ static int dcp_v14_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
 		int hz = drm_mode_vrefresh(m);
 
 		if (v14->board->log_bringup)
-			dev_info(dcp->dev, "timing %u/%u: " DRM_MODE_FMT "%s\n", i + 1, count,
-				 DRM_MODE_ARG(m), m->type & DRM_MODE_TYPE_PREFERRED ? " best" : "");
+			dev_info(dcp->dev, "timing %u/%u: " DRM_MODE_FMT " (timing id %u, color id %u)%s\n",
+				 i + 1, count, DRM_MODE_ARG(m), modes[i].timing_mode_id,
+				 modes[i].color_mode_id,
+				 m->type & DRM_MODE_TYPE_PREFERRED ? " best" : "");
 		else
 			dev_dbg(dcp->dev, "timing %u/%u: " DRM_MODE_FMT "%s\n", i + 1, count,
 				DRM_MODE_ARG(m), m->type & DRM_MODE_TYPE_PREFERRED ? " best" : "");
@@ -2574,8 +2631,26 @@ static int dcp_v14_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
 		    m->vdisplay != v14->panel_height - dcp->notch_height ||
 		    (hz != 60 && (hz != 120 || !v14->board->promotion)))
 			continue;
-		if (!best || (m->type & DRM_MODE_TYPE_PREFERRED))
+		if (dcp_v14_choose_timing(v14->board, j514m_request_120, hz,
+					  !!(m->type & DRM_MODE_TYPE_PREFERRED), !!best,
+					  best ? drm_mode_vrefresh(&best->mode) : 0))
 			best = &modes[i];
+	}
+	if (v14->board->log_bringup) {
+		bool found = false;
+
+		/* Only observe callbacks already received; issue no firmware RPC. */
+		for (i = 0; i < v14->property_count; i++) {
+			struct dcp_v14_property *p = &v14->properties[i];
+
+			if (strcmp(p->key, "DPTimingModeId"))
+				continue;
+			dev_info(dcp->dev, "firmware DPTimingModeId property: service %#x value %llu (unvalidated)\n",
+				 p->service, p->value);
+			found = true;
+		}
+		if (!found)
+			dev_info(dcp->dev, "firmware DPTimingModeId property not reported at mode selection\n");
 	}
 	if (!best) {
 		dev_err(dcp->dev, "no %ux%u timing at 60%s Hz among %u\n", v14->panel_width,
@@ -2589,6 +2664,16 @@ static int dcp_v14_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
 	kfree(modes);
 	if (!selected)
 		return -ENOMEM;
+	v14->advertised_hz = drm_mode_vrefresh(&selected->mode);
+	if (v14->board->experimental_timed_swaps && j514m_timed_swaps &&
+	    v14->advertised_hz == 120)
+		dev_warn(dcp->dev, "J514M experimental swap timestamps enabled; timing and safety unvalidated\n");
+	/* A 120 Hz timing is not evidence that this V14 path programs VRR. */
+	if (!dcp_v14_board_allows_vrr(v14->board, selected->vrr)) {
+		selected->vrr = false;
+		selected->min_vrr = 0;
+		selected->max_vrr = 0;
+	}
 	mutex_lock(&dcp->modes_lock);
 	kfree(dcp->modes);
 	dcp->modes = selected;
@@ -2647,10 +2732,11 @@ int iomfb_v14_7_start(struct apple_dcp *dcp)
 	mutex_lock(&dcp->modes_lock);
 	selected = dcp->modes[0].mode;
 	mutex_unlock(&dcp->modes_lock);
-	dev_info(dcp->dev, "%s display started: %ux%u@%d, %u notch rows %s, %ux%u mm\n",
+	dev_info(dcp->dev, "%s display started: %ux%u@%d%s, %u notch rows %s, %ux%u mm\n",
 		 v14->board->name, mode->hdisplay, mode->vdisplay, drm_mode_vrefresh(mode),
-		 v14->notch_rows,
-		 dcp->notch_height ? "hidden" : "shown", mode->width_mm, mode->height_mm);
+		 v14->board->boot_timing_unqualified ? " advertised; physical refresh unverified" : "",
+		 v14->notch_rows, dcp->notch_height ? "hidden" : "shown",
+		 mode->width_mm, mode->height_mm);
 	return 0;
 fail:
 	v14->failed = true;
@@ -2829,7 +2915,8 @@ static int dcp_v14_swap_locked(struct apple_dcp_v14 *v14, const u8 *surface, u64
 	if (!ret) {
 		dcp_v14_encode_swap(swap, id, DCP_V14_BLACK, surface, iova, width, height,
 				    dst_y, DCP_V14_LAYER);
-		if (dcp_v14_board_stamps_swaps(v14->board, v14->external))
+		if (dcp_v14_board_stamps_swaps(v14->board, v14->external,
+					       j514m_timed_swaps, v14->advertised_hz))
 			dcp_v14_swap_timestamps(swap);
 		nits = dcp_v14_swap_nits(v14, swap, &present);
 		ret = dcp_v14_call_guarded(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
@@ -2887,7 +2974,7 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 {
 	u8 surface[DCP_V14_SURFACE_SIZE];
 	struct drm_framebuffer *old;
-	u64 iova = 0, start, elapsed, swaps;
+	u64 iova = 0, start, completed, elapsed, swaps;
 	int ret;
 
 	lockdep_assert_held(&v14->lock);
@@ -2902,7 +2989,8 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 	start = ktime_get_ns();
 	ret = dcp_v14_swap_locked(v14, fb ? surface : NULL, iova, fb ? width : 0,
 				  fb ? height : 0, dst_y, ctm_state);
-	elapsed = ktime_get_ns() - start;
+	completed = ktime_get_ns();
+	elapsed = completed - start;
 	if (ret && v14->external && !READ_ONCE(v14->failed)) {
 		/* Refused before it was taken: the old framebuffer stays on screen. */
 		*retired = fb;
@@ -2917,8 +3005,15 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 	}
 	old = dcp_v14_publish_surface(v14, fb, surface, iova, width, height, dst_y);
 	swaps = ++v14->swaps;
-	if (fb)
+	if (fb) {
 		v14->mode_swaps++;
+		if (v14->last_fb_swap_ns && completed >= v14->last_fb_swap_ns)
+			v14->swap_interval_buckets[dcp_v14_swap_interval_bucket(
+				completed - v14->last_fb_swap_ns)]++;
+		v14->last_fb_swap_ns = completed;
+	} else {
+		v14->last_fb_swap_ns = 0;
+	}
 	v14->swap_ns_max = max(v14->swap_ns_max, elapsed);
 	*retired = old;
 	if (swaps <= 3)
@@ -3055,6 +3150,9 @@ int iomfb_v14_7_atomic_check(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	} else if (dcp->crashed || !v14 || READ_ONCE(v14->failed)) {
 		return -EIO;
 	}
+	if (!dcp->external && crtc_state && crtc_state->active &&
+	    !dcp_v14_board_allows_vrr(v14->board, crtc_state->vrr_enabled))
+		return -EINVAL;
 	if (!crtc_state || !crtc_state->active || !p || p->crtc != crtc || !p->visible)
 		return 0;
 
@@ -3297,16 +3395,45 @@ out:
 	return 0;
 }
 
+static int dcp_v14_internal_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state,
+				   bool request_120)
+{
+	struct apple_dcp_v14 *v14 = dcp->v14;
+	struct dcp_display_mode mode;
+	int ret = 0;
+
+	if (!lookup_mode(dcp, &crtc_state->mode, &mode))
+		return -EINVAL;
+	if (v14 && dcp_v14_board_requests_120(v14->board, false, request_120,
+					       drm_mode_vrefresh(&mode.mode))) {
+		mutex_lock(&v14->lock);
+		if (!v14->started || v14->failed)
+			ret = -EIO;
+		else if (!v14->j514m_timing_replied) {
+			dev_warn(dcp->dev, "requesting experimental J514M 120 Hz timing; panel behavior unvalidated\n");
+			ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
+			if (!ret)
+				v14->j514m_timing_replied = true;
+			else
+				v14->failed = true;
+		}
+		mutex_unlock(&v14->lock);
+		if (ret) {
+			dcp_mode_invalidate(&dcp->mode_state);
+			return ret;
+		}
+	}
+	/* Otherwise the firmware retains the boot timing. */
+	scoped_guard(spinlock_irqsave, &dcp->mode_state.lock)
+		dcp->mode_state.valid = true;
+	return 0;
+}
+
 int iomfb_v14_7_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state)
 {
 	if (dcp->external)
 		return dcp_v14_external_modeset(dcp, crtc_state);
-	/* The firmware keeps the timing it booted with, which is the only mode. */
-	if (!lookup_mode(dcp, &crtc_state->mode, NULL))
-		return -EINVAL;
-	scoped_guard(spinlock_irqsave, &dcp->mode_state.lock)
-		dcp->mode_state.valid = true;
-	return 0;
+	return dcp_v14_internal_modeset(dcp, crtc_state, j514m_request_120);
 }
 
 void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
@@ -3378,4 +3505,5 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 #include "iomfb_v14_7_external_audio_test.c"
 #include "iomfb_v14_7_backlight_test.c"
 #include "iomfb_v14_7_backlight_lifetime_test.c"
+#include "iomfb_v14_7_timing_test.c"
 #endif
