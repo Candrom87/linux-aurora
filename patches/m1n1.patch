@@ -1,0 +1,1736 @@
+diff --git a/src/firmware.c b/src/firmware.c
+index 26e4fb4..5a523df 100644
+--- a/src/firmware.c
++++ b/src/firmware.c
+@@ -376,8 +376,12 @@ static int gfx_fw_read_header(u64 addr, u32 *hdr)
+     int exc_before = exc_count;
+ 
+     exc_guard = GUARD_MARK | GUARD_SILENT;
+-    for (int i = 0; i < GFX_FW_HDR_SIZE / 4; i++)
+-        hdr[i] = read32(addr + 4 * i);
++    for (int i = 0; i < GFX_FW_HDR_SIZE / 4; i++) {
++        u32 value = read32(addr + 4 * i);
++        if (exc_count != exc_before)
++            break;
++        hdr[i] = value;
++    }
+     sysop("dsb sy");
+     sysop("isb");
+     exc_guard = GUARD_OFF;
+@@ -451,8 +455,12 @@ bool firmware_gfx_rtkit_version(char out[GFX_FW_VERSION_MAX])
+     u8 bytes[GFX_FW_VERSION_MAX];
+     int before = exc_count;
+     exc_guard = GUARD_MARK | GUARD_SILENT;
+-    for (size_t i = 0; i < sizeof(bytes); i++)
+-        bytes[i] = read8(addr + i);
++    for (size_t i = 0; i < sizeof(bytes); i++) {
++        u8 value = read8(addr + i);
++        if (exc_count != before)
++            break;
++        bytes[i] = value;
++    }
+     sysop("dsb sy");
+     sysop("isb");
+     exc_guard = GUARD_OFF;
+diff --git a/src/kboot.c b/src/kboot.c
+index 7818488..0c0dc35 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -5317,7 +5317,8 @@ static int dt_set_display(void)
+         return 0;
+     } else if (!fdt_node_check_compatible(dt, 0, "apple,t6030") ||
+                !fdt_node_check_compatible(dt, 0, "apple,t8122") ||
+-               !fdt_node_check_compatible(dt, 0, "apple,t6031")) {
++               !fdt_node_check_compatible(dt, 0, "apple,t6031") ||
++               !fdt_node_check_compatible(dt, 0, "apple,t6034")) {
+         /*
+          * Fail-soft handoff (kboot_display_handoff.c): it always returns 0, never uses the
+          * helpers above (they bail out of kboot or enable nodes) and never enables a node.
+@@ -5325,7 +5326,8 @@ static int dt_set_display(void)
+          * reserved only with chosen.asahi,t8122-dcpext=1 and that handoff. On T6031 it does nothing
+          * unless the board is a J514C or J516C, and reserves only __OS_LOG unless
+          * chosen.asahi,t6031-dcp=1 (on a J516C, dt_set_m3_defaults() sets it unless a config line
+-         * set it).
++         * set it). The experimental T6034 J514M profile does nothing without its separate
++         * chosen.asahi,t6034-dcp=1 opt-in.
+          */
+         ret = dt_set_display_handoff(dt);
+         if (!fdt_node_check_compatible(dt, 0, "apple,t8122"))
+@@ -5585,6 +5587,23 @@ static int dt_set_pmp_t6031(void)
+     return 0;
+ }
+ 
++/* J514M only, only on the explicit display experiment: export this Mac's
++ * values. dt_pass_pmp validates PMP interrupts and the DART address first. */
++static const struct pmp_values_soc pmp_values_t6034 = {
++    "apple,t6034", "asahi,t6034-pmp", "T6034", {1181, 1180, 1183, 1182}, 0x290300000, 0x4000,
++};
++
++static void dt_set_pmp_t6034(void)
++{
++    int chosen = fdt_path_offset(dt, "/chosen"), len = 0;
++    const char *opt = chosen < 0 ? NULL : fdt_getprop(dt, chosen, "asahi,t6034-dcp", &len);
++
++    if (chip_id != T6034 || fdt_node_check_compatible(dt, 0, "apple,j514m") ||
++        !opt || len != 2 || memcmp(opt, "1", 2))
++        return;
++    dt_pass_pmp(&pmp_values_t6034);
++}
++
+ /*
+  * T8122: pass this Mac's PMP values on either M3 Air with the display
+  * handoff switch, chosen.asahi,t8122-dcp=1.
+@@ -6436,6 +6455,8 @@ int kboot_prepare_dt(void *fdt)
+     // A T6031 takes its PMP values (32K) and its display, GPU and firmware handoff (about 16K)
+     if (chip_id == T6031)
+         dt_bufsize += 4 * SZ_16K;
++    if (chip_id == T6034)
++        dt_bufsize += 4 * SZ_16K;
+     // A T6032 takes only its firmware image UUID list (about 16K)
+     if (chip_id == T6032)
+         dt_bufsize += SZ_16K;
+@@ -6643,6 +6664,8 @@ int kboot_prepare_dt(void *fdt)
+         dt_set_pmp_t6031();
+         dt_t6031_fw_uuids(dt);
+         dt_t6031_facts(dt);
++    } else if (chip_id == T6034) {
++        dt_set_pmp_t6034();
+     } else if (chip_id == T6032) {
+         dt_t6031_fw_uuids(dt);
+     }
+diff --git a/src/kboot_display_handoff.c b/src/kboot_display_handoff.c
+index 51e9576..f554f33 100644
+--- a/src/kboot_display_handoff.c
++++ b/src/kboot_display_handoff.c
+@@ -60,7 +60,7 @@
+  * nodes stay "disabled": only a kernel that sees apple,t8122-handoff may enable them, and a T8122
+  * kernel device tree without display nodes is normal. No T8122 PMP is handed off here.
+  *
+- * T6031 (M3 Max, J514C/J516C only; nothing at all on another board or chip, so not on a T6034):
++ * T6031 (M3 Max, J514C/J516C only; nothing at all on another board or chip):
+  * the T8122 handoff with T6031 values, armed by chosen.asahi,t6031-dcp=1, as on T6030 and T8122.
+  * On a J516C dt_set_m3_defaults() (kboot.c) sets it unless a config line set it; a J514C still
+  * needs the boot.bin config line. The kernel decides whether to take the display over (a kernel
+@@ -362,7 +362,41 @@ static const struct dcp_soc dcp_soc_t6031 = {
+     .pmgr_disp_cpu = 0x2922802a0UL,
+ };
+ 
+-static const struct dcp_soc *const dcp_socs[] = {&dcp_soc_t6030, &dcp_soc_t8122, &dcp_soc_t6031};
++/*
++ * J514M / T6034: an experimental, explicit opt-in profile. The J514M ADT
++ * reports the DCP/DART windows used below and the pinned 14.7 DCP UUID.
++ * The powered DART, firmware layouts and panel have not been validated on
++ * this board. No default selects this profile, and kernel support and a
++ * tested recovery path are needed before trying it on hardware.
++ */
++static const char *const dcp_boards_t6034[] = {"apple,j514m", NULL};
++
++static const struct dcp_soc dcp_soc_t6034 = {
++    .name = "T6034 J514M experimental",
++    .chip = T6034,
++    .compat = "apple,t6034",
++    .boards = dcp_boards_t6034,
++    .boards_desc = "J514M",
++    .dcp_compat = "apple,t6034-dcp",
++    .disp_compat = "apple,t6034-display-subsystem",
++    .marker = "apple,t6034-handoff",
++    .optin = "asahi,t6034-dcp",
++    .adt_psreg = true,
++    .board_gate = true,
++    .uuid = "F493F03E-CC40-3D89-9A08-5F259BA2B246",
++    .os_fw = V14_7,
++    .os_fw_name = "14.7",
++    .coproc = 0x386c00000UL,
++    .dart_dcp = 0x38530c000UL,
++    .dart_disp = 0x385304000UL,
++    .vm_base = DCP6_DART_VM_BASE,
++    .vm_size = DCP6_DART_VM_SIZE,
++    /* The J514M ADT's DISP_CPU state, for comparison with its resolved gates. */
++    .pmgr_disp_cpu = 0x2922802a0UL,
++};
++
++static const struct dcp_soc *const dcp_socs[] = {&dcp_soc_t6030, &dcp_soc_t8122,
++                                                 &dcp_soc_t6031, &dcp_soc_t6034};
+ 
+ struct dcp6_seg {
+     u64 phys;
+@@ -1292,9 +1326,27 @@ static int dcp6_adt_power_on(void)
+     if (n < 0)
+         return -1;
+ 
++    /* J514M's recorded DCP virtual gate resolves to precisely these two
++     * nearest real parents. Refuse changed topology before any MMIO. This
++     * is a consistency check, not validation of the wider power chain. */
++    if (dcp6.soc == &dcp_soc_t6034) {
++        bool cpu = false, fe = false;
++        for (int i = 0; i < n; i++) {
++            cpu |= ps[i].addr == 0x2922802a0UL;
++            fe |= ps[i].addr == 0x292280298UL;
++        }
++        if (n != 2 || !cpu || !fe)
++            bail("J514M display power topology differs from the recorded CPU/FE gates, "
++                 "not touching the DCP\n");
++    }
++
+     int g = dcp6_guard_begin();
+-    for (int i = 0; i < n; i++)
++    for (int i = 0; i < n; i++) {
+         val[i] = read32(ps[i].addr);
++        /* Do not issue another MMIO read after an observed synchronous abort. */
++        if (exc_count != g)
++            break;
++    }
+     if (dcp6_guard_end(g))
+         bail("reading the display power state faulted, not touching the DCP\n");
+ 
+diff --git a/src/kboot_gpu.c b/src/kboot_gpu.c
+index 38ed148..b0567d9 100644
+--- a/src/kboot_gpu.c
++++ b/src/kboot_gpu.c
+@@ -2605,6 +2605,81 @@ static int t6031_probe_restore(void *ctx)
+     return t6031_closure_restore(&((struct t6031_probe *)ctx)->closure);
+ }
+ 
++static int t6034_probe_enable(void *ctx)
++{
++    return t6034_closure_enable(&((struct t6031_probe *)ctx)->closure);
++}
++
++static int t6034_probe_restore(void *ctx)
++{
++    return t6034_closure_restore(&((struct t6031_probe *)ctx)->closure);
++}
++
++/* Read already-loaded DRAM only. A parsed header is not firmware admission. */
++static void t6034_gpu_image_diagnostic(void *dt)
++{
++    const char *name = "asahi,t6034-gpu-image";
++    struct gfx_fw_image_info info;
++    char rtkit[GFX_FW_VERSION_MAX];
++    int chosen = fdt_path_offset(dt, "/chosen");
++
++    if (!mcc_carveouts_valid) {
++        printf("FDT: GPU: T6034 firmware diagnostic refused: protected-memory inventory incomplete\n");
++        return;
++    }
++    if (chosen < 0 || fdt_subnode_offset(dt, chosen, name) >= 0 ||
++        !firmware_gfx_image_info(&info))
++        return;
++    bool have_rtkit = firmware_gfx_rtkit_version(rtkit);
++    int node = fdt_add_subnode(dt, chosen, name);
++    if (node < 0)
++        return;
++    int err = fdt_setprop_u32(dt, node, "schema-version", 1) ||
++              fdt_setprop(dt, node, "image-uuid", info.uuid, sizeof(info.uuid)) ||
++              fdt_setprop_u32(dt, node, "image-text-size", info.text_size) ||
++              fdt_setprop_u32(dt, node, "image-patchbay-offset", info.patchbay_offset) ||
++              fdt_setprop_u32(dt, node, "image-patchbay-size", info.patchbay_size) ||
++              fdt_setprop_u32(dt, node, "rtkit-version-present", have_rtkit);
++    if (!err && have_rtkit)
++        err = fdt_setprop_string(dt, node, "image-rtkit-version", rtkit);
++    if (err) {
++        chosen = fdt_path_offset(dt, "/chosen");
++        node = chosen < 0 ? -1 : fdt_subnode_offset(dt, chosen, name);
++        if (node >= 0)
++            fdt_del_node(dt, node);
++        printf("FDT: GPU: T6034 could not publish firmware diagnostic\n");
++    }
++}
++
++/*
++ * Separate firmware-only diagnostic: no PMGR vote or GPU register access.
++ * The memory reads are guarded but an unresponsive bus may still hang; this
++ * is opt-in, untested on T6034, and not an ABI or firmware admission.
++ */
++static void t6034_gpu_image_only(void *dt)
++{
++    int gpu, len, sgx;
++    u32 compat_len = 0;
++    const char *status, *adt_compat;
++
++    if (fdt_node_check_compatible(dt, 0, "apple,j514m") ||
++        fdt_node_check_compatible(dt, 0, "apple,t6034") ||
++        !g15_optin(dt, "asahi,t6034-gpu-image-probe"))
++        return;
++    gpu = fdt_path_offset(dt, "gpu");
++    status = gpu < 0 ? NULL : fdt_getprop(dt, gpu, "status", &len);
++    sgx = adt_path_offset(adt, "/arm-io/sgx");
++    adt_compat = sgx < 0 ? NULL : adt_getprop(adt, sgx, "compatible", &compat_len);
++    if (gpu < 0 || fdt_node_check_compatible(dt, gpu, "apple,agx-t6034") ||
++        !status || len != 9 || memcmp(status, "disabled", 9) ||
++        !adt_compat || compat_len != sizeof("gpu,t6034") ||
++        memcmp(adt_compat, "gpu,t6034", sizeof("gpu,t6034"))) {
++        printf("FDT: GPU: T6034 firmware diagnostic refused: board or GPU node mismatch\n");
++        return;
++    }
++    t6034_gpu_image_diagnostic(dt);
++}
++
+ static void t6031_log_closure(const char *when, const struct t6031_closure *c, bool after)
+ {
+     printf("FDT: GPU: T6031 power %s:", when);
+@@ -2657,6 +2732,61 @@ static void t6031_gpu_probe(void *dt)
+            g15_t6031_id.core_mask[2]);
+ }
+ 
++/*
++ * J514M diagnostic only: read raw identity after a bounded PMGR vote and
++ * restore. PASS means only that the read and restore completed. The result
++ * does not admit a GPU profile or enable a device. Never selected by default.
++ */
++static void t6034_gpu_diagnostic(void *dt)
++{
++    static const struct t6031_probe_ops ops = {
++        .enable = t6034_probe_enable,
++        .active = t6031_probe_active,
++        .read = t6031_probe_read,
++        .restore = t6034_probe_restore,
++    };
++    static const char name[] = "asahi,t6034-gpu-powered-identity";
++    struct t6031_probe p;
++    int path[8], gpu, len, sgx;
++    u32 compat_len = 0;
++    u64 size, dt_sgx;
++    const char *status;
++
++    if (fdt_node_check_compatible(dt, 0, "apple,j514m") ||
++        fdt_node_check_compatible(dt, 0, "apple,t6034") ||
++        !g15_optin(dt, "asahi,t6034-gpu-probe"))
++        return;
++    gpu = fdt_path_offset(dt, "gpu");
++    status = gpu < 0 ? NULL : fdt_getprop(dt, gpu, "status", &len);
++    sgx = adt_path_offset(adt, "/arm-io/sgx");
++    const char *adt_compat = sgx < 0 ? NULL : adt_getprop(adt, sgx, "compatible", &compat_len);
++    if (gpu < 0 || fdt_node_check_compatible(dt, gpu, "apple,agx-t6034") ||
++        !status || len != 9 || memcmp(status, "disabled", 9) ||
++        !adt_compat || compat_len != sizeof("gpu,t6034") ||
++        memcmp(adt_compat, "gpu,t6034", sizeof("gpu,t6034")) ||
++        adt_path_offset_trace(adt, "/arm-io/sgx", path) < 0 ||
++        adt_get_reg(adt, path, "reg", 0, &p.sgx_base, &size) < 0 ||
++        p.sgx_base != T6031_SGX_BASE || size < G15_SGX_CORE_MASK + 12 ||
++        g15_dt_reg_by_name(dt, gpu, "sgx", &dt_sgx) || dt_sgx != p.sgx_base ||
++        t6031_closure_get("/arm-io/sgx", &p.closure) || p.closure.n != 2 ||
++        p.closure.ps[0].addr != 0x408e80110UL || p.closure.ps[1].addr != 0x408e80100UL) {
++        printf("FDT: GPU: T6034 diagnostic refused: board, GPU node or power closure mismatch\n");
++        return;
++    }
++    if (t6031_identity_node_named(dt, name, p.closure.n) < 0) {
++        printf("FDT: GPU: T6034 diagnostic refused: cannot reserve result node\n");
++        return;
++    }
++    struct t8122_powered_identity id = t6031_probe_run_raw(&ops, &p);
++    if (t6031_identity_publish_named(dt, name, &id, &p.closure))
++        printf("FDT: GPU: T6034 diagnostic could not publish result\n");
++    else if (id.result == T8122_ID_PASS)
++        t6034_gpu_image_diagnostic(dt);
++    if (id.result == T8122_ID_POWER_OFF_FAILED)
++        printf("FDT: GPU: T6034 WARNING: power closure restore failed\n");
++    printf("FDT: GPU: T6034 raw identity result %u; no GPU handoff\n", id.result);
++}
++
+ /*
+  * T6031 (J514C/J516C): the firmware image facts, the bounded powered identity read, then the GPU
+  * setup (which itself touches no GPU hardware). Each part is fail-soft; all three
+@@ -3083,6 +3213,11 @@ int dt_set_gpu(void *dt)
+             return dt_set_gpu_g15(dt, &g15_soc_t6030);
+         case T6031:
+             return dt_set_gpu_t6031(dt);
++        case T6034:
++            t6034_gpu_image_only(dt);
++            t6034_gpu_diagnostic(dt);
++            printf("ADT: GPU: unsupported chip! T6034 diagnostic only\n");
++            return 0;
+         case T6032:
+             /*
+              * T6032 (J575D): refused until the firmware ABI exists. Missing pieces, each one a
+diff --git a/src/kboot_gpu_t6031.c b/src/kboot_gpu_t6031.c
+index ba0eacf..ef1ceb9 100644
+--- a/src/kboot_gpu_t6031.c
++++ b/src/kboot_gpu_t6031.c
+@@ -134,6 +134,99 @@ static bool closure_same(u32 before, u32 after)
+     return (before & PS_AUTO_ENABLE) || FIELD_GET(PS_ACTUAL, before) == FIELD_GET(PS_ACTUAL, after);
+ }
+ 
++/*
++ * T6034 has not been tested on hardware. Guard each access separately, so a
++ * failed read cannot become the value of a subsequent read-modify-write.
++ * Like pmgr_set_mode(), this clears auto and sticky gate bits and polls for
++ * the requested actual state. An abort guard cannot protect against a bus
++ * transaction that never completes, nor make an unknown transition safe.
++ */
++static int t6034_ps_read(u64 addr, u32 *val)
++{
++    int g = guard_begin();
++    u32 v = read32(addr);
++    if (guard_end(g))
++        return -1;
++    *val = v;
++    return 0;
++}
++
++static int t6034_ps_write(u64 addr, u32 val)
++{
++    int g = guard_begin();
++    write32(addr, val);
++    return guard_end(g);
++}
++
++static int t6034_ps_mode(u64 addr, u32 mode)
++{
++    u32 v;
++    if (t6034_ps_read(addr, &v))
++        return -1;
++    if (!(v & PS_AUTO_ENABLE) && FIELD_GET(PS_TARGET, v) == mode &&
++        FIELD_GET(PS_ACTUAL, v) == mode)
++        return 0;
++    v = (v & ~(PS_AUTO_ENABLE | PS_WAS_CLKGATED | PS_WAS_PWRGATED | PS_TARGET)) |
++        FIELD_PREP(PS_TARGET, mode);
++    if (t6034_ps_write(addr, v))
++        return -1;
++    for (int i = 0; i < 10000; i++) {
++        if (t6034_ps_read(addr, &v))
++            return -1;
++        if (FIELD_GET(PS_ACTUAL, v) == mode)
++            return 0;
++        udelay(1);
++    }
++    return -1;
++}
++
++int t6034_closure_enable(struct t6031_closure *c)
++{
++    /* Parents first; restore always runs afterwards, even on partial failure. */
++    for (int i = c->n - 1; i >= 0; i--)
++        if (t6034_ps_mode(c->ps[i].addr, PMGR_PS_ACTIVE))
++            return -1;
++    return 0;
++}
++
++int t6034_closure_restore(struct t6031_closure *c)
++{
++    int ret = 0;
++    for (int i = 0; i < c->n; i++) {
++        struct t6031_ps *p = &c->ps[i];
++        u32 now, want = FIELD_GET(PS_TARGET, p->before);
++        if (t6034_ps_read(p->addr, &now)) {
++            ret = -1;
++            break;
++        }
++        if ((FIELD_GET(PS_TARGET, now) != want ||
++             (!(p->before & PS_AUTO_ENABLE) && (now & PS_AUTO_ENABLE))) &&
++            t6034_ps_mode(p->addr, want)) {
++            ret = -1;
++            break;
++        }
++        if (p->before & PS_AUTO_ENABLE) {
++            if (t6034_ps_read(p->addr, &now) ||
++                t6034_ps_write(p->addr, (now & ~(PS_WAS_CLKGATED | PS_WAS_PWRGATED)) |
++                                          PS_AUTO_ENABLE)) {
++                ret = -1;
++                break;
++            }
++        }
++        /* Never restore a parent until this child is confirmed restored. */
++        if (t6034_ps_read(p->addr, &now) || !closure_same(p->before, now)) {
++            ret = -1;
++            break;
++        }
++    }
++    for (int i = 0; i < c->n; i++) {
++        if (t6034_ps_read(c->ps[i].addr, &c->ps[i].after) ||
++            !closure_same(c->ps[i].before, c->ps[i].after))
++            ret = -1;
++    }
++    return ret;
++}
++
+ int t6031_closure_restore(struct t6031_closure *c)
+ {
+     int ret = 0;
+@@ -168,7 +261,8 @@ int t6031_closure_restore(struct t6031_closure *c)
+ 
+ /* ---- the identity ---- */
+ 
+-struct t8122_powered_identity t6031_probe_run(const struct t6031_probe_ops *ops, void *ctx)
++static struct t8122_powered_identity probe_run(const struct t6031_probe_ops *ops, void *ctx,
++                                               bool validate_t6031)
+ {
+     struct t8122_powered_identity id = {.result = T8122_ID_POWER_FAILED};
+ 
+@@ -178,7 +272,7 @@ struct t8122_powered_identity t6031_probe_run(const struct t6031_probe_ops *ops,
+             /* A faulted read leaves nothing worth publishing */
+             id = (struct t8122_powered_identity){.result = T8122_ID_READ_FAULT};
+         } else {
+-            id.result = t6031_identity_valid(&id) ? T8122_ID_PASS : T8122_ID_MISMATCH;
++            id.result = !validate_t6031 || t6031_identity_valid(&id) ? T8122_ID_PASS : T8122_ID_MISMATCH;
+         }
+     }
+     if (ops->restore(ctx))
+@@ -186,13 +280,24 @@ struct t8122_powered_identity t6031_probe_run(const struct t6031_probe_ops *ops,
+     return id;
+ }
+ 
++struct t8122_powered_identity t6031_probe_run(const struct t6031_probe_ops *ops, void *ctx)
++{
++    return probe_run(ops, ctx, true);
++}
++
++struct t8122_powered_identity t6031_probe_run_raw(const struct t6031_probe_ops *ops, void *ctx)
++{
++    return probe_run(ops, ctx, false);
++}
++
+ bool t6031_identity_valid(const struct t8122_powered_identity *id)
+ {
+     u32 version = id->id_version, counts = id->id_counts_1;
+     u64 mask = id->core_mask[0] | ((u64)id->core_mask[1] << 32);
+ 
+     return (version >> 24) == 7 && ((version >> 16) & 0xff) == 4 && ((counts >> 16) & 0xf) == 1 &&
+-           ((counts >> 8) & 0xff) == T6031_GPU_CLUSTERS && mask && !(mask >> T6031_CORE_SLOTS) &&
++           ((counts >> 8) & 0xff) == T6031_GPU_CLUSTERS &&
++           (counts & 0xff) == T6031_CORES_PER_CLUSTER && mask && !(mask >> T6031_CORE_SLOTS) &&
+            !id->core_mask[2];
+ }
+ 
+@@ -214,16 +319,16 @@ static const char *const identity_u32[] = {
+     "core-mask-2",  "id-counts-1", "id-counts-2",
+ };
+ 
+-int t6031_identity_node(void *dt, int nps)
++int t6031_identity_node_named(void *dt, const char *name, int nps)
+ {
+     fdt64_t zero64[T6031_PS_MAX] = {0};
+     fdt32_t zero32[T6031_PS_MAX] = {0};
+     int chosen = fdt_path_offset(dt, "/chosen");
+ 
+     if (nps < 0 || nps > T6031_PS_MAX || chosen < 0 ||
+-        fdt_subnode_offset(dt, chosen, T6031_GPU_IDENTITY) >= 0)
++        !name || fdt_subnode_offset(dt, chosen, name) >= 0)
+         return -1;
+-    int node = fdt_add_subnode(dt, chosen, T6031_GPU_IDENTITY);
++    int node = fdt_add_subnode(dt, chosen, name);
+     if (node < 0)
+         return -1;
+     int err = fdt_setprop_u32(dt, node, "schema-version", 1);
+@@ -242,18 +347,25 @@ int t6031_identity_node(void *dt, int nps)
+     return node;
+ }
+ 
++int t6031_identity_node(void *dt, int nps)
++{
++    return t6031_identity_node_named(dt, T6031_GPU_IDENTITY, nps);
++}
++
+ static int set_u32(void *dt, int node, const char *name, u32 value)
+ {
+     fdt32_t v = cpu_to_fdt32(value);
+     return fdt_setprop_inplace(dt, node, name, &v, sizeof(v));
+ }
+ 
+-int t6031_identity_publish(void *dt, const struct t8122_powered_identity *id,
+-                           const struct t6031_closure *c)
++int t6031_identity_publish_named(void *dt, const char *name,
++                                 const struct t8122_powered_identity *id,
++                                 const struct t6031_closure *c)
+ {
+     fdt64_t addr[T6031_PS_MAX];
+     fdt32_t before[T6031_PS_MAX], after[T6031_PS_MAX];
+-    int node = fdt_path_offset(dt, "/chosen/" T6031_GPU_IDENTITY);
++    int chosen = fdt_path_offset(dt, "/chosen");
++    int node = chosen < 0 || !name ? -1 : fdt_subnode_offset(dt, chosen, name);
+ 
+     if (node < 0)
+         return -1;
+@@ -277,6 +389,12 @@ int t6031_identity_publish(void *dt, const struct t8122_powered_identity *id,
+     return set_u32(dt, node, "probe-result", id->result);
+ }
+ 
++int t6031_identity_publish(void *dt, const struct t8122_powered_identity *id,
++                           const struct t6031_closure *c)
++{
++    return t6031_identity_publish_named(dt, T6031_GPU_IDENTITY, id, c);
++}
++
+ /* ---- the loaded GPU firmware image ---- */
+ 
+ /*
+diff --git a/src/kboot_gpu_t6031.h b/src/kboot_gpu_t6031.h
+index ea47fa2..58dbbc3 100644
+--- a/src/kboot_gpu_t6031.h
++++ b/src/kboot_gpu_t6031.h
+@@ -43,6 +43,9 @@ int t6031_closure_active(const struct t6031_closure *c);
+  * automatic power management bit pmgr_set_mode() clears. 0 if each is back (`after` is filled).
+  */
+ int t6031_closure_restore(struct t6031_closure *c);
++/* Diagnostic-only variant: guard each PMGR access and stop at the first fault. */
++int t6034_closure_enable(struct t6031_closure *c);
++int t6034_closure_restore(struct t6031_closure *c);
+ 
+ /* The identity probe, with the same steps as t8122_power_probe_run() */
+ struct t6031_probe_ops {
+@@ -52,6 +55,8 @@ struct t6031_probe_ops {
+     int (*restore)(void *ctx);
+ };
+ struct t8122_powered_identity t6031_probe_run(const struct t6031_probe_ops *ops, void *ctx);
++/* PASS means the raw read completed and the power state was restored; it is not hardware admission. */
++struct t8122_powered_identity t6031_probe_run_raw(const struct t6031_probe_ops *ops, void *ctx);
+ 
+ /* G15C: family 7, variant 4, one die of 4 clusters, 1 to 40 cores in bits 0-39 of the masks */
+ bool t6031_identity_valid(const struct t8122_powered_identity *id);
+@@ -64,8 +69,12 @@ u32 t6031_core_counts(const struct t8122_powered_identity *id, u32 counts[T6031_
+  * device tree, then filled with probe-result written last.
+  */
+ int t6031_identity_node(void *dt, int nps);
++int t6031_identity_node_named(void *dt, const char *name, int nps);
+ int t6031_identity_publish(void *dt, const struct t8122_powered_identity *id,
+                            const struct t6031_closure *c);
++int t6031_identity_publish_named(void *dt, const char *name,
++                                 const struct t8122_powered_identity *id,
++                                 const struct t6031_closure *c);
+ 
+ /*
+  * /chosen/asahi,t6031-gpu-image: the loaded GPU image's header facts, DRAM reads only. Returns the
+diff --git a/src/mcc.c b/src/mcc.c
+index f64d30b..04990b3 100644
+--- a/src/mcc.c
++++ b/src/mcc.c
+@@ -129,6 +129,7 @@ struct tz_regs t6031_tz_regs = {
+ 
+ size_t mcc_carveout_count;
+ struct mcc_carveout mcc_carveouts[PLANE_TZ_MAX_REGS + 1];
++bool mcc_carveouts_valid;
+ 
+ struct mcc_regs {
+     u64 plane_base;
+@@ -224,11 +225,16 @@ int mcc_enable_cache(void)
+ 
+ int mcc_unmap_carveouts(void)
+ {
++    bool invalid = false;
++
++    mcc_carveouts_valid = false;
+     if (!mcc_initialized)
+         return -1;
+ 
+     mcc_carveout_count = 0;
+     memset(mcc_carveouts, 0, sizeof mcc_carveouts);
++    if (mem_size_actual > UINT64_MAX - ram_base)
++        return -1;
+ 
+     // All MCCs and planes should have identical configs
+     // Note: For unhandled machines, the TZ regions can be found (on m1, m2, m3) by looking at
+@@ -241,8 +247,6 @@ int mcc_unmap_carveouts(void)
+ 
+         if (node < 0)
+             return -1;
+-        if (mem_size_actual > UINT64_MAX - ram_base)
+-            return -1;
+         for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+             u32 len;
+             const u64 *range = adt_getprop(adt, node, names[i], &len);
+@@ -267,6 +271,7 @@ int mcc_unmap_carveouts(void)
+             mcc_carveouts[mcc_carveout_count].size = size;
+             mcc_carveout_count++;
+         }
++        /* The two ADT fallback ranges are not a complete MCC inventory. */
+         return 0;
+     }
+ 
+@@ -280,6 +285,7 @@ int mcc_unmap_carveouts(void)
+             if (!start || start == end) {
+                 printf("MMU: TZ%d region has bad bounds 0x%lx..0x%lx (iBoot bug?)\n", i, start,
+                        end);
++                invalid = true;
+                 continue;
+             }
+ 
+@@ -287,6 +293,16 @@ int mcc_unmap_carveouts(void)
+             end = (end + 1) << 12;
+             start |= ram_base;
+             end |= ram_base;
++            if (end <= start || start < ram_base || end > ram_base + mem_size_actual) {
++                printf("MMU: TZ%d region is outside usable DRAM bounds\n", i);
++                invalid = true;
++                continue;
++            }
++            if (mcc_carveout_count >= ARRAY_SIZE(mcc_carveouts)) {
++                printf("MMU: too many protected-memory regions\n");
++                invalid = true;
++                break;
++            }
+             printf("MMU: Unmapping TZ%d region at 0x%lx..0x%lx\n", i, start, end);
+             mmu_rm_mapping(start, end - start);
+             mmu_rm_mapping(start | REGION_RWX_EL0, end - start);
+@@ -298,6 +314,7 @@ int mcc_unmap_carveouts(void)
+         }
+     }
+ 
++    mcc_carveouts_valid = !invalid;
+     return 0;
+ }
+ 
+diff --git a/src/mcc.h b/src/mcc.h
+index c0c9525..7f81c15 100644
+--- a/src/mcc.h
++++ b/src/mcc.h
+@@ -12,6 +12,8 @@ struct mcc_carveout {
+ 
+ extern size_t mcc_carveout_count;
+ extern struct mcc_carveout mcc_carveouts[];
++/* True only after the current pass collected every enabled known TZ slot. */
++extern bool mcc_carveouts_valid;
+ 
+ int mcc_init(void);
+ int mcc_unmap_carveouts(void);
+diff --git a/tests/g15_host/utils.h b/tests/g15_host/utils.h
+index 4e178d1..b9bf3fa 100644
+--- a/tests/g15_host/utils.h
++++ b/tests/g15_host/utils.h
+@@ -56,6 +56,12 @@ static inline u32 mask32(u64 addr, u32 clear, u32 set)
+ 
+ #define sysop(op) host_sysop(op)
+ 
++/* The T6034 diagnostic helper links into this host harness but is not run here. */
++static inline void udelay(u32 usec)
++{
++    (void)usec;
++}
++
+ static inline size_t get_page_size(void)
+ {
+     return 16384;
+diff --git a/tests/kboot_gpu_g15_host.c b/tests/kboot_gpu_g15_host.c
+index 404f7f4..d4f5163 100644
+--- a/tests/kboot_gpu_g15_host.c
++++ b/tests/kboot_gpu_g15_host.c
+@@ -32,6 +32,7 @@ uint64_t ram_base;
+ u64 boot_flags, mem_size_actual;
+ size_t mcc_carveout_count;
+ struct mcc_carveout mcc_carveouts[4];
++bool mcc_carveouts_valid;
+ 
+ static char log_buf[1 << 18];
+ static size_t log_len;
+@@ -946,6 +947,16 @@ static void prepare_j613_setup(u32 core_mask, int standin)
+                                "asahi,t8122-gpu-power-standin", "1"));
+ }
+ 
++/* The full14 path now requires both board and chip compatibles. Model an
++ * unavailable fuse with guarded faults so the stand-in remains in use. */
++static void j613_full14_without_fuse(void)
++{
++    static const char compat[] = "apple,j613\0apple,t8122";
++    CHK(fdt_setprop(dtbuf, 0, "compatible", compat, sizeof(compat)));
++    mmio_set(T8122_LEAK_FUSE_WORD0, 0, 1);
++    mmio_set(T8122_LEAK_FUSE_WORD1, 0, 1);
++}
++
+ static void t8122_j613_switch_off(void)
+ {
+     /* The J613's own G15G image, without the stand-in switch: refused as before */
+@@ -1303,9 +1314,9 @@ static void expect_standin_handoff(const u32 *max_pwr)
+     assert(log_has("FW: GFX: identified image g15g build c0, firmware 14.8.3"));
+     assert(log_has("FDT: GPU: T8122 power model: stand-in (not measured; does not limit clocks)"));
+     assert(!log_has("perf-states-sram present but unused"));
+-    /* Not a J613 root here: no fuse read, and the stand-in leakage */
++    /* The full14 fixture is a J613; its simulated fuse is inaccessible. */
+     assert(log_has("FDT: GPU: T8122 leakage: the stand-in\n"));
+-    assert(!strstr(trace_buf, "0x2e42c812"));
++    assert(log_has("T8122 leakage fuse: the read faulted"));
+     assert(prop_len(dtbuf, "/chosen", "asahi,t8122-gpu-leak-fuse") < 0);
+     assert(log_has("FDT: GPU: Leakage: 6412.000"));
+     assert(log_has("FDT: GPU: T8122 GPU enabled (firmware 14.8.3)"));
+@@ -1384,6 +1395,7 @@ static void expect_standin_handoff(const u32 *max_pwr)
+ static void t8122_j613_standin_10(void)
+ {
+     prepare_j613_setup(0x3ff, 1);
++    j613_full14_without_fuse();
+     run();
+     static const u32 max_pwr[14] = {0,        7370636,  10950020, 12234028, 14239188,
+                                     15044005, 17748106, 18794802, 22305218, 23683214,
+@@ -1397,6 +1409,7 @@ static void t8122_j613_standin_10(void)
+ static void t8122_j613_standin_8(void)
+ {
+     prepare_j613_setup(0x37e, 1);
++    j613_full14_without_fuse();
+     run();
+     static const u32 max_pwr[14] = {0,        6979241,  10075828, 10997526, 12776519,
+                                     13420372, 15831849, 16669205, 19824824, 20927220,
+@@ -1513,6 +1526,7 @@ static void t8122_j613_standin_sram_below(void)
+ {
+     /* SRAM below max(core, floor) is fine: the kernel then gives it more, not less */
+     prepare_j613_setup(0x3ff, 1);
++    j613_full14_without_fuse();
+     set_j613_sram(13, 930);
+     run();
+     assert(!strcmp(status_of(dtbuf, "/soc/gpu@292400000"), "okay"));
+@@ -1524,6 +1538,7 @@ static void t8122_j613_standin_idleoff(void)
+ {
+     /* An ADT idle-off standby timer is added too */
+     prepare_j613_setup(0x3ff, 1);
++    j613_full14_without_fuse();
+     hset_u32("/arm-io/sgx", "gpu-idleoff-standby-timer", 700);
+     run();
+     assert(!strcmp(status_of(dtbuf, "/soc/gpu@292400000"), "okay"));
+@@ -1552,6 +1567,7 @@ static void t8122_j613_standin_no_room(void)
+      * and the GPU power released
+      */
+     prepare_j613_setup(0x3ff, 1);
++    j613_full14_without_fuse();
+     fdt_pack(dtbuf);
+     CHK(fdt_open_into(dtbuf, dtbuf, fdt_totalsize(dtbuf) + 0x700));
+     run();
+@@ -1566,11 +1582,12 @@ static void t8122_j613_standin_wrong_id(void)
+ {
+     /* A failure after the power-on (here the GPU ID) releases the power, as without the switch */
+     prepare_j613_setup(0x3ff, 1);
++    j613_full14_without_fuse();
+     mmio_set(SGX_BASE + 0xd04000, 0x07032000, 0);
+     run();
+     expect_gpu_off(dtbuf);
+     assert(pmgr_enables == 1 && pmgr_disables == 1 && pmgr_off == 1);
+-    assert(log_has("not a G15G"));
++    assert(log_has("full-start T8122 powered identity rejected"));
+ }
+ 
+ /*
+@@ -1684,7 +1701,8 @@ static void t8122_j613_fuse_fault(void)
+ static void prepare_j613_standin_fuse(int use, int fault)
+ {
+     prepare_j613_setup(0x3ff, 1);
+-    CHK(fdt_setprop_string(dtbuf, 0, "compatible", "apple,j613"));
++    static const char compat[] = "apple,j613\0apple,t8122";
++    CHK(fdt_setprop(dtbuf, 0, "compatible", compat, sizeof(compat)));
+     mmio_set(T8122_LEAK_FUSE_WORD0, 0xa0000000, fault);
+     mmio_set(T8122_LEAK_FUSE_WORD1, 0x000aaaaa, 0);
+     if (use)
+@@ -1699,6 +1717,7 @@ static void t8122_j613_standin_fuse_off(void)
+      * node, OPP table and reserved memory as a run with no fuse at all.
+      */
+     prepare_j613_setup(0x3ff, 1);
++    j613_full14_without_fuse();
+     run();
+     char *gpu0 = dump_path(dtbuf, "/soc/gpu@292400000");
+     char *opp0 = dump_path(dtbuf, "/opp-table-gpu");
+@@ -1757,14 +1776,15 @@ static void t8122_j613_standin_fuse_on_fault(void)
+ 
+ static void t8122_j613_standin_fuse_not_j613(void)
+ {
+-    /* The switch on another T8122 root: no fuse values, so the setup refuses */
++    /* An unsupported root is refused before any GPU power vote. */
+     prepare_j613_setup(0x3ff, 1);
+     CHK(fdt_setprop_string(dtbuf, fdt_path_offset(dtbuf, "/chosen"), "asahi,t8122-gpu-fuse-leakage",
+                            "1"));
+     run();
+     expect_gpu_off(dtbuf);
+     assert(!strstr(trace_buf, "0x2e42c812"));
+-    assert(log_has("but this boot has no T8122 leakage fuse values"));
++    assert(log_has("full-start T8122 identity node unavailable"));
++    assert(!pmgr_enables);
+ }
+ 
+ /* Each Air hands over its own fuse, clock and power values. */
+diff --git a/tests/mcc_carveout_host.c b/tests/mcc_carveout_host.c
+new file mode 100644
+index 0000000..b657b08
+--- /dev/null
++++ b/tests/mcc_carveout_host.c
+@@ -0,0 +1,87 @@
++/* SPDX-License-Identifier: MIT */
++/* Host-only test of the extracted real mcc_unmap_carveouts() function. */
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++typedef uint32_t u32;
++typedef uint64_t u64;
++#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
++#define REGION_RWX_EL0 0x1000000000000000ULL
++#define REGION_RW_EL0  0x2000000000000000ULL
++#define REGION_RX_EL1  0x3000000000000000ULL
++
++struct mcc_carveout { u64 base, size; };
++struct tz_regs { u32 count, stride, start, end, enable; };
++static bool mcc_initialized;
++static struct { struct tz_regs *tz; } mcc_regs[1];
++static size_t mcc_carveout_count;
++static struct mcc_carveout mcc_carveouts[5];
++static bool mcc_carveouts_valid;
++static u64 ram_base, mem_size_actual;
++static void *adt;
++static u32 fake_regs[12];
++static bool have_fallback_node, have_second_fallback;
++static u64 fallback[2][2];
++static unsigned int unmaps;
++
++static u32 plane_read32(int mcc, int plane, u64 offset)
++{
++    assert(!mcc && !plane && offset / 4 < ARRAY_SIZE(fake_regs));
++    return fake_regs[offset / 4];
++}
++static void mmu_rm_mapping(u64 base, u64 size) { (void)base; (void)size; unmaps++; }
++static size_t get_page_size(void) { return 16384; }
++static int adt_path_offset(const void *tree, const char *path)
++{
++    (void)tree; (void)path;
++    return have_fallback_node ? 1 : -1;
++}
++static const void *adt_getprop(const void *tree, int node, const char *name, u32 *len)
++{
++    (void)tree; (void)node;
++    if (!strcmp(name, "region-id-4")) { *len = sizeof(fallback[0]); return fallback[0]; }
++    if (!strcmp(name, "region-id-2") && have_second_fallback) {
++        *len = sizeof(fallback[1]);
++        return fallback[1];
++    }
++    return NULL;
++}
++
++#include "mcc_unmap_extracted.inc"
++
++int main(void)
++{
++    struct tz_regs tz = { .count = 4, .stride = 12, .start = 0, .end = 4, .enable = 8 };
++    ram_base = 0x10000000000ULL;
++    mem_size_actual = 0x10000000ULL;
++    mcc_regs[0].tz = &tz;
++
++    mcc_carveouts_valid = true;
++    assert(mcc_unmap_carveouts() == -1 && !mcc_carveouts_valid);
++    mcc_initialized = true;
++    assert(mcc_unmap_carveouts() == 0 && mcc_carveouts_valid && !mcc_carveout_count);
++    fake_regs[0] = 1; fake_regs[1] = 2; fake_regs[2] = 1;
++    assert(mcc_unmap_carveouts() == 0 && mcc_carveouts_valid && mcc_carveout_count == 1);
++    fake_regs[3] = 0; fake_regs[4] = 2; fake_regs[5] = 1;
++    assert(mcc_unmap_carveouts() == 0 && !mcc_carveouts_valid && mcc_carveout_count == 1);
++    fake_regs[3] = 0x20000; fake_regs[4] = 0x20001; fake_regs[5] = 1;
++    assert(mcc_unmap_carveouts() == 0 && !mcc_carveouts_valid);
++    mem_size_actual = UINT64_MAX;
++    assert(mcc_unmap_carveouts() == -1 && !mcc_carveouts_valid);
++    mem_size_actual = 0x10000000ULL;
++    mcc_regs[0].tz = NULL;
++    assert(mcc_unmap_carveouts() == -1 && !mcc_carveouts_valid);
++    have_fallback_node = true;
++    fallback[0][0] = ram_base + 0x4000; fallback[0][1] = 0x4000;
++    fallback[1][0] = ram_base + 0x8000; fallback[1][1] = 0x4000;
++    assert(mcc_unmap_carveouts() == -1 && !mcc_carveouts_valid);
++    have_second_fallback = true;
++    assert(mcc_unmap_carveouts() == 0 && !mcc_carveouts_valid && mcc_carveout_count == 2);
++    fallback[1][1] = 1;
++    assert(mcc_unmap_carveouts() == -1 && !mcc_carveouts_valid);
++    puts("MCC inventory host checks passed");
++    return 0;
++}
+diff --git a/tests/run-kboot-gpu-g15.sh b/tests/run-kboot-gpu-g15.sh
+index 267b75e..54c9e32 100644
+--- a/tests/run-kboot-gpu-g15.sh
++++ b/tests/run-kboot-gpu-g15.sh
+@@ -64,16 +64,19 @@ else
+     scenarios=$("$tmp/new/kboot-gpu-g15" list) || fail "current-tree scenario discovery"
+ fi
+ pass=0
++failed=0
+ for s in $scenarios; do
+     "$tmp/new/kboot-gpu-g15" "$s" > "$tmp/new/$s.out" 2>&1 || {
+         cat "$tmp/new/$s.out"
+         echo "FAIL: $s"
+-        exit 1
++        failed=$((failed + 1))
++        continue
+     }
+     pass=$((pass + 1))
+ done
+ [ "$pass" -gt 0 ] || fail "no current-tree G15 scenarios executed"
+ echo "PASS: $pass G15 scenarios"
++[ "$failed" -eq 0 ] || fail "$failed current-tree G15 scenarios failed"
+ 
+ if [ -n "$base" ]; then
+     mkdir -p "$tmp/base-tree"
+diff --git a/tests/run-mcc-carveout-host.sh b/tests/run-mcc-carveout-host.sh
+new file mode 100644
+index 0000000..d905480
+--- /dev/null
++++ b/tests/run-mcc-carveout-host.sh
+@@ -0,0 +1,12 @@
++#!/bin/sh
++# Run the real mcc_unmap_carveouts body with a simulated MCC/ADT.
++set -eu
++cd "$(dirname "$0")/.."
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT HUP INT TERM
++awk '/^int mcc_unmap_carveouts\(void\)/ {on=1} on {print} on && /^}/ {exit}' \
++    src/mcc.c > "$tmp/mcc_unmap_extracted.inc"
++grep -q 'mcc_carveouts_valid = !invalid' "$tmp/mcc_unmap_extracted.inc"
++${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror -I "$tmp" \
++    tests/mcc_carveout_host.c -o "$tmp/test"
++"$tmp/test"
+diff --git a/tests/run-t6031-handoff.sh b/tests/run-t6031-handoff.sh
+index 09a4d49..af2afdf 100644
+--- a/tests/run-t6031-handoff.sh
++++ b/tests/run-t6031-handoff.sh
+@@ -77,6 +77,31 @@ for f in kboot_display_handoff.c kboot_gpu.c kboot_gpu26.c kboot_gpu_t6031.c \
+     kboot_gpu_t8122_power.c kboot_t6031.c firmware.c pmgr.c; do
+     cp "src/$f" "$tmp/src/"
+ done
++# Host-only static preflight: this wrapper is appended to the temporary copy,
++# never to the m1n1 image. It inspects ADT/DT inputs, without firmware admission,
++# power votes, GPU reads, FDT changes or a T6034 enablement path.
++cat >> "$tmp/src/kboot_gpu.c" <<'EOF'
++int host_j514m_gpu_tables(void *dt)
++{
++    int gpu = fdt_path_offset(dt, "gpu"), sgx = adt_path_offset(adt, "/arm-io/sgx");
++    u32 count, tables, sram;
++    const struct perf_state *ps;
++    struct g15_power_values pv;
++    struct g15_aux aux[2] = {{.adt = "cs-perf-states", .dt = "apple,cs-opp"},
++                             {.adt = "afr-perf-states", .dt = "apple,afr-opp"}};
++    if (gpu < 0 || sgx < 0)
++        return 1;
++    if (g15_get_pstates(&g15_soc_t6031, sgx, &count, &tables, &ps))
++        return 2;
++    if (g15_get_power_props(sgx, count, tables, ps, &pv))
++        return 3;
++    if (g15_get_aux(dt, gpu, sgx, 1, &aux[0]) || g15_get_aux(dt, gpu, sgx, 1, &aux[1]))
++        return 4;
++    if (g15_csafr_sram(aux, pv.min_sram_uv, &sram))
++        return 5;
++    return 0;
++}
++EOF
+ cp tests/t6031_host/*.h tests/t6031_host.c "$tmp/src/"
+ ${CC:-cc} -std=gnu11 -D_GNU_SOURCE -O1 -g -Wall -Wno-unused-function -Wno-unused-variable \
+     -Wno-format-truncation -Wno-address-of-packed-member \
+diff --git a/tests/run-t8122-display-handoff.sh b/tests/run-t8122-display-handoff.sh
+index 0e9d44e..6f633b8 100644
+--- a/tests/run-t8122-display-handoff.sh
++++ b/tests/run-t8122-display-handoff.sh
+@@ -38,7 +38,7 @@ extra=""
+ for dtb in $dtbs; do
+     echo "### $(basename "$dtb")"
+     for s in unarmed publish repeat wrong-image not-running outside-segment power-off \
+-        contract-selftest $extra; do
++        contract-selftest t6034-unarmed t6034-wrong-board t6034-wrong-chip $extra; do
+         if ! "$tmp/t8122-display-host" "$dtb" "$s" > "$tmp/$s.log" 2>&1; then
+             fail=1
+             cat "$tmp/$s.log"
+diff --git a/tests/t6031_adt.py b/tests/t6031_adt.py
+index acf1488..6d7a1e5 100644
+--- a/tests/t6031_adt.py
++++ b/tests/t6031_adt.py
+@@ -12,6 +12,7 @@ the T6031 handoff reads; those are added with synthetic values, each listed on s
+ import re
+ import struct
+ import sys
++import os
+ 
+ PROP = re.compile(r'^  (\S+) \[(\d+)\] = (.*)$')
+ STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+@@ -108,6 +109,8 @@ def synthesize(nodes, order):
+     for nub, uuid in SYNTH_UUID.items():
+         path = "/arm-io/" + nub
+         if path in nodes:
++            if os.environ.get("J514M_TEST") == "1" and nub == "dcp/iop-dcp-nub":
++                uuid = "F493F03E-CC40-3D89-9A08-5F259BA2B246"
+             setprop(nodes, order, path, "uuid", uuid.encode() + b"\0",
+                     "dropped by the collector; placeholder")
+ 
+diff --git a/tests/t6031_host.c b/tests/t6031_host.c
+index bf292a8..fb35a4e 100644
+--- a/tests/t6031_host.c
++++ b/tests/t6031_host.c
+@@ -27,6 +27,7 @@
+ #include "adt.h"
+ #include "exception.h"
+ #include "firmware.h"
++#include "gfx_fw_image_info.h"
+ #include "kboot_gpu_t6031.h"
+ #include "kboot_t6031.h"
+ #include "mcc.h"
+@@ -41,6 +42,7 @@
+ 
+ int dt_set_display_handoff(void *dt);
+ int dt_set_gpu(void *dt);
++int host_j514m_gpu_tables(void *dt); /* test-only wrapper in the temporary source copy */
+ void host_pmp_t6031(void *dt); /* the run script's copy of kboot.c's dt_set_pmp_t6031() */
+ 
+ /* ---------- m1n1 globals and stubs ---------- */
+@@ -54,6 +56,7 @@ uint64_t ram_base;
+ u64 boot_flags, mem_size_actual;
+ size_t mcc_carveout_count;
+ struct mcc_carveout mcc_carveouts[4];
++bool mcc_carveouts_valid;
+ 
+ u32 adt_get_size(void)
+ {
+@@ -138,6 +141,7 @@ struct reg {
+ };
+ static struct reg regs[1024];
+ static int nregs;
++static bool inject_display_first_ps_fault;
+ 
+ struct region {
+     u64 base, size;
+@@ -151,8 +155,11 @@ struct write {
+     u32 old, val;
+ };
+ static struct write writes[4096];
+-static int nwrites, unguarded, gpu_reads, gpu_reads_unpowered;
++static int nwrites, unguarded, gpu_reads, gpu_reads_unpowered, ps_reads, dram_reads;
+ static u64 stuck_off, stuck_on; /* PS registers whose actual state ignores a power-on/off */
++static u64 inject_dram_fault;
++static bool inject_ps_write_fault, inject_ps_poll_fault, ps_poll_fault_armed;
++static int ps_gfx_reads, inject_ps_read_number;
+ 
+ static bool ps_window(u64 a)
+ {
+@@ -224,8 +231,25 @@ static bool gfx_on(void)
+ 
+ u32 host_read32(u64 a)
+ {
++    if (a == inject_dram_fault && inject_dram_fault)
++        return fault("injected DRAM read", a);
++    if (ps_window(a))
++        ps_reads++;
++    if (ps_window(a) && inject_display_first_ps_fault) {
++        inject_display_first_ps_fault = false;
++        return fault("injected display PMGR read", a);
++    }
++    if (a == PS_GFX && inject_ps_read_number && ++ps_gfx_reads == inject_ps_read_number) {
++        inject_ps_read_number = 0;
++        return fault("injected PMGR mode read", a);
++    }
++    if (a == PS_GFX && ps_poll_fault_armed) {
++        ps_poll_fault_armed = false;
++        return fault("injected PMGR poll read", a);
++    }
+     u8 *p = dram_at(a, 4);
+     if (p) {
++        dram_reads++;
+         u32 v;
+         memcpy(&v, p, 4);
+         return v;
+@@ -255,14 +279,22 @@ u64 host_read64(u64 a)
+ 
+ u8 host_read8(u64 a)
+ {
++    if (a == inject_dram_fault && inject_dram_fault)
++        return fault("injected DRAM byte read", a);
+     u8 *p = dram_at(a, 1);
+     if (!p)
+         return fault("read8", a);
++    dram_reads++;
+     return *p;
+ }
+ 
+ void host_write32(u64 a, u32 v)
+ {
++    if (a == PS_GFX && inject_ps_write_fault) {
++        inject_ps_write_fault = false;
++        fault("injected PMGR write", a);
++        return;
++    }
+     struct reg *r = reg_find(a);
+     if (!r || (r->kind != R_PS && r->kind != R_PLAIN)) {
+         fault("write32", a);
+@@ -280,6 +312,10 @@ void host_write32(u64 a, u32 v)
+         v = (v & ~(GENMASK(7, 4) | BIT(8) | BIT(9))) | (actual << 4);
+     }
+     r->val = v;
++    if (a == PS_GFX && inject_ps_poll_fault) {
++        inject_ps_poll_fault = false;
++        ps_poll_fault_armed = true;
++    }
+ }
+ 
+ void udelay(u32 d)
+@@ -389,8 +425,12 @@ static bool display_off_after_init;
+ 
+ static void world(const struct opts *o)
+ {
+-    nregs = ndram = nwrites = unguarded = gpu_reads = gpu_reads_unpowered = 0;
++    nregs = ndram = nwrites = unguarded = gpu_reads = gpu_reads_unpowered = ps_reads = dram_reads = 0;
+     stuck_off = stuck_on = 0;
++    inject_dram_fault = 0;
++    inject_display_first_ps_fault = false;
++    inject_ps_write_fault = inject_ps_poll_fault = ps_poll_fault_armed = false;
++    ps_gfx_reads = inject_ps_read_number = 0;
+     exc_guard = GUARD_OFF;
+     exc_count = 0;
+     log_len = 0;
+@@ -400,6 +440,7 @@ static void world(const struct opts *o)
+     ram_base = 0x10000000000UL;
+     mem_size_actual = 0xc00000000UL;
+     mcc_carveout_count = 0;
++    mcc_carveouts_valid = true; /* synthetic complete inventory */
+ 
+     /* SIMULATED PMGR: GPX and AFR on (AFR with automatic power management), GFX off, display on */
+     reg_set(PS_GPX, 0xff, R_PS);
+@@ -1017,6 +1058,359 @@ static void sc_t6034(void *dt)
+           "T6034: the GPU setup says unsupported, as before");
+ }
+ 
++/* The J514M path uses real ADT layout data and simulated registers/page tables. */
++enum j514m_case { J514M_PUBLISH, J514M_POWER_OFF, J514M_WRONG_IMAGE, J514M_WRONG_OS,
++                  J514M_POWER_FAULT, J514M_MISSING_FE, J514M_MISSING_CPU };
++
++static void sc_j514m(void *dt, enum j514m_case scenario)
++{
++    static const char compat[] = "apple,j514m\0apple,t6034\0apple,arm-platform";
++    bool power_off = scenario == J514M_POWER_OFF;
++    world(&(struct opts){ .display_off = power_off });
++    chip_id = T6034;
++    /* Synthetic usable-RAM interval and framebuffer inside the synthetic vram
++     * segment. These are simulation inputs, not measurements of this Mac. */
++    ram_min = 0x10010000000UL;
++    ram_len = 0x10000000UL;
++    int seg_count;
++    const struct adt_segment_ranges *display_seg = adt_segs("/arm-io/dcp/iop-dcp-nub", &seg_count);
++    assert(seg_count > 6);
++    fb_base = display_seg[6].phys + 0x4000;
++    assert(!fdt_setprop(dt, 0, "compatible", compat, sizeof(compat)));
++    assert(!fdt_setprop_string(dt, fdt_path_offset(dt, "dcp"), "compatible", "apple,t6034-dcp"));
++    assert(!fdt_setprop_string(dt, fdt_path_offset(dt, "disp0"), "compatible",
++                               "apple,t6034-display-subsystem"));
++    chosen_set(dt, "asahi,t6034-dcp", "1");
++    if (scenario == J514M_WRONG_IMAGE) {
++        u32 len;
++        int nub = adt_path_offset(adt, "/arm-io/dcp/iop-dcp-nub");
++        char *uuid = (char *)adt_getprop(adt, nub, "uuid", &len);
++        assert(uuid && len == 37);
++        uuid[0] = '0';
++    }
++    if (scenario == J514M_WRONG_OS)
++        os_firmware.version = V14_8_3;
++    if (scenario == J514M_MISSING_FE || scenario == J514M_MISSING_CPU) {
++        u32 len;
++        int dcp_node = adt_path_offset(adt, "/arm-io/dcp");
++        u32 *gates = (u32 *)adt_getprop(adt, dcp_node, "clock-gates", &len);
++        assert(gates && len == sizeof(*gates));
++        /* Replace the virtual gate by just one of its two real parents. */
++        *gates = scenario == J514M_MISSING_FE ? 280 : 279;
++    }
++    assert(pmgr_init() == 0);
++    if (power_off)
++        reg_set(PS_DISP_CPU, 0, R_PS);
++    if (scenario == J514M_POWER_FAULT) {
++        ps_reads = 0;
++        inject_display_first_ps_fault = true;
++    }
++    if (scenario == J514M_MISSING_FE || scenario == J514M_MISSING_CPU)
++        ps_reads = 0;
++    nwrites = 0;
++    assert(dt_set_display_handoff(dt) == 0);
++    int dcp = fdt_path_offset(dt, "dcp"), disp = fdt_path_offset(dt, "disp0");
++    int pio = fdt_path_offset(dt, "disp0-piodma");
++    bool marked = u32_is(dt, "dcp", "apple,t6034-handoff", 1) &&
++                  u32_is(dt, "disp0", "apple,t6034-handoff", 1) &&
++                  u32_is(dt, "disp0-piodma", "apple,t6034-handoff", 1);
++    if (scenario != J514M_PUBLISH) {
++        check(!marked && !fdt_getprop(dt, dcp, "memory-region", NULL),
++              "J514M refusal: no display handoff");
++        check(!count_writes(DART_DCP, DART_DCP + 0x4000),
++              "J514M refusal: no DCP DART writes");
++    } else {
++        check(marked, "J514M: handoff marker on all three nodes");
++        check(dcp >= 0 && disp >= 0 && pio >= 0 &&
++              fdt_getprop(dt, dcp, "memory-region", NULL), "J514M: DCP regions published");
++        check(reg_val(DART_DCP + 0x200) & 1, "J514M: simulated DCP DART locked");
++    }
++    if (scenario == J514M_POWER_FAULT) {
++        check(exc_count == 1, "J514M: first display power read fault was guarded");
++        check(ps_reads == 1, "J514M: no subsequent display power register read");
++    }
++    if (scenario == J514M_MISSING_FE || scenario == J514M_MISSING_CPU)
++        check(ps_reads == 0, "J514M: unexpected power topology refused before PMGR reads");
++    check(!unguarded, "J514M: no unguarded faults");
++}
++
++static void sc_j514m_publish(void *dt) { sc_j514m(dt, J514M_PUBLISH); }
++static void sc_j514m_power_off(void *dt) { sc_j514m(dt, J514M_POWER_OFF); }
++static void sc_j514m_power_fault(void *dt) { sc_j514m(dt, J514M_POWER_FAULT); }
++static void sc_j514m_missing_fe(void *dt) { sc_j514m(dt, J514M_MISSING_FE); }
++static void sc_j514m_missing_cpu(void *dt) { sc_j514m(dt, J514M_MISSING_CPU); }
++static void sc_j514m_wrong_image(void *dt) { sc_j514m(dt, J514M_WRONG_IMAGE); }
++static void sc_j514m_wrong_os(void *dt) { sc_j514m(dt, J514M_WRONG_OS); }
++
++/* The J514M ADT's power graph, exercised only against mock PMGR registers. */
++static void sc_j514m_gpu_power_case(void *dt, bool timeout)
++{
++    struct t6031_closure closure;
++    (void)dt;
++    world(&(struct opts){0});
++    chip_id = T6034;
++    assert(pmgr_init() == 0);
++    memcpy(snap, regs, sizeof(regs));
++    nsnap = nregs;
++    int ret = t6031_closure_get("/arm-io/sgx", &closure);
++    check(ret == 0, "J514M GPU: power closure resolves");
++    if (ret)
++        return;
++    check(closure.n == 2 && closure.ps[0].addr == PS_GFX && closure.ps[1].addr == PS_AFR,
++          "J514M GPU: closure contains GFX and AFR, in child-first order");
++    if (timeout)
++        stuck_off = PS_GFX;
++    ret = pmgr_adt_power_enable("/arm-io/sgx");
++    if (timeout)
++        check(ret != 0, "J514M GPU: simulated power-on timeout is reported");
++    else
++        check(ret == 0 && t6031_closure_active(&closure) == 0,
++              "J514M GPU: mock closure powers on");
++    ret = t6031_closure_restore(&closure);
++    check(ret == 0 && !changed_registers(snap, nsnap, 0),
++          "J514M GPU: mock closure is restored");
++    check(!gpu_reads && !unguarded, "J514M GPU: no GPU identity access or unguarded fault");
++}
++
++static void sc_j514m_gpu_power(void *dt) { sc_j514m_gpu_power_case(dt, false); }
++static void sc_j514m_gpu_timeout(void *dt) { sc_j514m_gpu_power_case(dt, true); }
++
++/* Static inputs only; applying the T6031 parser is not T6034 admission. */
++enum gpu_tables_case { GPU_TABLES_OBSERVED, GPU_TABLES_BAD_COUNT, GPU_TABLES_BAD_SRAM };
++
++static void sc_j514m_gpu_tables_case(void *dt, enum gpu_tables_case which)
++{
++    world(&(struct opts){0});
++    chip_id = T6034;
++    if (which != GPU_TABLES_OBSERVED) {
++        int sgx = adt_path_offset(adt, "/arm-io/sgx");
++        u32 len, value = which == GPU_TABLES_BAD_COUNT ? 99 : 0;
++        const char *name = which == GPU_TABLES_BAD_COUNT ? "gpu-num-perf-states" :
++                                                            "perf-states-sram";
++        u8 *p = (u8 *)adt_getprop(adt, sgx, name, &len);
++        size_t offset = which == GPU_TABLES_BAD_COUNT ? 0 : 12; /* state 1 voltage */
++        assert(p && len >= offset + sizeof(value));
++        memcpy(p + offset, &value, sizeof(value));
++    }
++    size_t size = fdt_totalsize(dt);
++    void *before = malloc(size);
++    assert(before);
++    memcpy(before, dt, size);
++    nwrites = 0;
++    int ret = host_j514m_gpu_tables(dt);
++    int expected = which == GPU_TABLES_OBSERVED ? 0 : which == GPU_TABLES_BAD_COUNT ? 2 : 3;
++    check(ret == expected, "J514M static GPU table preflight: result %d expected %d", ret,
++          expected);
++    check(!nwrites && !gpu_reads, "J514M static GPU table preflight: no mock hardware access");
++    check(!memcmp(before, dt, size), "J514M static GPU table preflight: DT unchanged");
++    free(before);
++}
++static void sc_j514m_gpu_tables(void *dt) { sc_j514m_gpu_tables_case(dt, GPU_TABLES_OBSERVED); }
++static void sc_j514m_gpu_bad_count(void *dt) { sc_j514m_gpu_tables_case(dt, GPU_TABLES_BAD_COUNT); }
++static void sc_j514m_gpu_bad_sram(void *dt) { sc_j514m_gpu_tables_case(dt, GPU_TABLES_BAD_SRAM); }
++
++enum j514m_probe_case { PROBE_OK, PROBE_UNARMED, PROBE_WRONG_BOARD, PROBE_TIMEOUT, PROBE_FAULT,
++                        PROBE_RESTORE_FAIL, PROBE_WRONG_NODE, PROBE_DUPLICATE,
++                        PROBE_PS_READ_FAULT, PROBE_PS_WRITE_FAULT, PROBE_PS_POLL_FAULT,
++                        PROBE_KEEP_PARENT_ON, PROBE_BAD_IMAGE };
++
++static void sc_j514m_probe(void *dt, enum j514m_probe_case scenario)
++{
++    static const char good[] = "apple,j514m\0apple,t6034\0apple,arm-platform";
++    static const char bad[] = "apple,j516m\0apple,t6034\0apple,arm-platform";
++    const char *compatible = scenario == PROBE_WRONG_BOARD ? bad : good;
++    size_t size = scenario == PROBE_WRONG_BOARD ? sizeof(bad) : sizeof(good);
++    world(&(struct opts){ .gpu_fault = scenario == PROBE_FAULT });
++    chip_id = T6034;
++    if (scenario == PROBE_BAD_IMAGE) {
++        int n;
++        const struct adt_segment_ranges *segments = adt_segs("/arm-io/gfx-asc", &n);
++        u32 zero = 0;
++        memcpy(dram_at(segments[0].phys + 0x4200, sizeof(zero)), &zero, sizeof(zero));
++    }
++    if (scenario == PROBE_OK)
++        reg_set(SGX + 0xd04000, 0x01020304, R_GPU); /* deliberately not a T6031 identity */
++    assert(!fdt_setprop(dt, 0, "compatible", compatible, size));
++    assert(!fdt_setprop_string(dt, fdt_path_offset(dt, "gpu"), "compatible",
++                               scenario == PROBE_WRONG_NODE ? "apple,agx-t6031" : "apple,agx-t6034"));
++    assert(!fdt_setprop_string(dt, fdt_path_offset(dt, "gpu"), "status", "disabled"));
++    if (scenario != PROBE_UNARMED)
++        chosen_set(dt, "asahi,t6034-gpu-probe", "1");
++    if (scenario == PROBE_DUPLICATE)
++        assert(fdt_add_subnode(dt, fdt_path_offset(dt, "/chosen"),
++                               "asahi,t6034-gpu-powered-identity") >= 0);
++    assert(pmgr_init() == 0);
++    if (scenario == PROBE_KEEP_PARENT_ON)
++        reg_set(PS_AFR, 0, R_PS); /* simulated initially off parent */
++    memcpy(snap, regs, sizeof(regs));
++    nsnap = nregs;
++    nwrites = 0;
++    if (scenario == PROBE_TIMEOUT)
++        stuck_off = PS_GFX;
++    if (scenario == PROBE_RESTORE_FAIL || scenario == PROBE_KEEP_PARENT_ON)
++        stuck_on = PS_GFX;
++    inject_ps_write_fault = scenario == PROBE_PS_WRITE_FAULT;
++    inject_ps_poll_fault = scenario == PROBE_PS_POLL_FAULT;
++    if (scenario == PROBE_PS_READ_FAULT)
++        inject_ps_read_number = 2; /* snapshot succeeds, read before GFX write faults */
++    assert(dt_set_gpu(dt) == 0);
++    const char *node = "/chosen/asahi,t6034-gpu-powered-identity";
++    if (scenario == PROBE_UNARMED || scenario == PROBE_WRONG_BOARD ||
++        scenario == PROBE_WRONG_NODE || scenario == PROBE_DUPLICATE) {
++        check((scenario == PROBE_DUPLICATE || node_at(dt, node) < 0) && !gpu_reads && !nwrites,
++              "J514M probe refused: no GPU read and no register writes");
++    } else {
++        u32 expected = (scenario == PROBE_OK || scenario == PROBE_BAD_IMAGE) ? T8122_ID_PASS :
++                       (scenario == PROBE_TIMEOUT || scenario == PROBE_PS_READ_FAULT ||
++                        scenario == PROBE_PS_WRITE_FAULT ||
++                        scenario == PROBE_PS_POLL_FAULT) ? T8122_ID_POWER_FAILED :
++                       scenario == PROBE_FAULT ? T8122_ID_READ_FAULT : T8122_ID_POWER_OFF_FAILED;
++        check(u32_is(dt, node, "probe-result", expected), "J514M probe publishes result %u", expected);
++        if (scenario == PROBE_OK)
++            check(u32_is(dt, node, "id-version", 0x01020304),
++                  "J514M probe publishes raw ID without T6031 validation");
++        if (scenario == PROBE_TIMEOUT || scenario == PROBE_PS_READ_FAULT ||
++            scenario == PROBE_PS_WRITE_FAULT ||
++            scenario == PROBE_PS_POLL_FAULT)
++            check(!gpu_reads, "J514M probe does not read GPU after power-on failure");
++        if (scenario == PROBE_PS_READ_FAULT) {
++            bool wrote_gfx = false;
++            for (int i = 0; i < nwrites; i++)
++                wrote_gfx |= writes[i].addr == PS_GFX;
++            check(!inject_ps_read_number && !wrote_gfx,
++                  "J514M probe never writes GFX after its mode read faults");
++        }
++        if (scenario != PROBE_RESTORE_FAIL && scenario != PROBE_KEEP_PARENT_ON)
++            check(!changed_registers(snap, nsnap, 0), "J514M probe restores simulated power state");
++        if (scenario == PROBE_KEEP_PARENT_ON)
++            check(FIELD_GET(GENMASK(7, 4), reg_val(PS_AFR)) == 0xf &&
++                  FIELD_GET(GENMASK(3, 0), reg_val(PS_AFR)) == 0xf,
++                  "J514M probe keeps parent active after child restore failure");
++    }
++    const char *image = "/chosen/asahi,t6034-gpu-image";
++    if (scenario == PROBE_OK) {
++        int len;
++        const void *uuid = prop(dt, image, "image-uuid", &len);
++        const char *rtkit = prop(dt, image, "image-rtkit-version", NULL);
++        check(uuid && len == 16 && !memcmp(uuid, sim_image_uuid, 16) && rtkit &&
++              !strcmp(rtkit, sim_rtkit), "J514M publishes simulated firmware identity");
++    } else if (scenario == PROBE_BAD_IMAGE) {
++        check(node_at(dt, image) < 0, "J514M refuses a malformed firmware header");
++    }
++    check(!strcmp(status_of(dt, "gpu"), "disabled"), "J514M probe leaves GPU disabled");
++    check(!unguarded && !gpu_reads_unpowered, "J514M probe has no unguarded or unpowered reads");
++}
++
++static void sc_j514m_probe_ok(void *dt) { sc_j514m_probe(dt, PROBE_OK); }
++static void sc_j514m_probe_unarmed(void *dt) { sc_j514m_probe(dt, PROBE_UNARMED); }
++static void sc_j514m_probe_wrong_board(void *dt) { sc_j514m_probe(dt, PROBE_WRONG_BOARD); }
++static void sc_j514m_probe_timeout(void *dt) { sc_j514m_probe(dt, PROBE_TIMEOUT); }
++static void sc_j514m_probe_fault(void *dt) { sc_j514m_probe(dt, PROBE_FAULT); }
++static void sc_j514m_probe_restore_fail(void *dt) { sc_j514m_probe(dt, PROBE_RESTORE_FAIL); }
++static void sc_j514m_probe_wrong_node(void *dt) { sc_j514m_probe(dt, PROBE_WRONG_NODE); }
++static void sc_j514m_probe_duplicate(void *dt) { sc_j514m_probe(dt, PROBE_DUPLICATE); }
++static void sc_j514m_probe_ps_write_fault(void *dt) { sc_j514m_probe(dt, PROBE_PS_WRITE_FAULT); }
++static void sc_j514m_probe_ps_poll_fault(void *dt) { sc_j514m_probe(dt, PROBE_PS_POLL_FAULT); }
++static void sc_j514m_probe_ps_read_fault(void *dt) { sc_j514m_probe(dt, PROBE_PS_READ_FAULT); }
++static void sc_j514m_probe_keep_parent(void *dt) { sc_j514m_probe(dt, PROBE_KEEP_PARENT_ON); }
++static void sc_j514m_probe_bad_image(void *dt) { sc_j514m_probe(dt, PROBE_BAD_IMAGE); }
++
++enum image_only_case { IMAGE_OK, IMAGE_UNARMED, IMAGE_WRONG_BOARD, IMAGE_WRONG_NODE,
++                       IMAGE_BAD_HEADER, IMAGE_READ_FAULT, IMAGE_RTKIT_FAULT, IMAGE_DUPLICATE,
++                       IMAGE_DISABLED_OPTION, IMAGE_ENABLED_GPU, IMAGE_WRONG_ADT,
++                       IMAGE_NO_MCC_INVENTORY, IMAGE_PROTECTED_HEADER };
++
++static void sc_j514m_image_only(void *dt, enum image_only_case scenario)
++{
++    static const char good[] = "apple,j514m\0apple,t6034\0apple,arm-platform";
++    static const char bad[] = "apple,j516m\0apple,t6034\0apple,arm-platform";
++    const char *compatible = scenario == IMAGE_WRONG_BOARD ? bad : good;
++    size_t size = scenario == IMAGE_WRONG_BOARD ? sizeof(bad) : sizeof(good);
++    const char *image = "/chosen/asahi,t6034-gpu-image";
++    int n, len;
++
++    world(&(struct opts){0});
++    chip_id = T6034;
++    assert(!fdt_setprop(dt, 0, "compatible", compatible, size));
++    assert(!fdt_setprop_string(dt, fdt_path_offset(dt, "gpu"), "compatible",
++                               scenario == IMAGE_WRONG_NODE ? "apple,agx-t6031" : "apple,agx-t6034"));
++    assert(!fdt_setprop_string(dt, fdt_path_offset(dt, "gpu"), "status",
++                               scenario == IMAGE_ENABLED_GPU ? "okay" : "disabled"));
++    if (scenario != IMAGE_UNARMED)
++        chosen_set(dt, "asahi,t6034-gpu-image-probe", scenario == IMAGE_DISABLED_OPTION ? "0" : "1");
++    if (scenario == IMAGE_WRONG_ADT) {
++        u32 compat_len;
++        int sgx = adt_path_offset(adt, "/arm-io/sgx");
++        char *compat = (char *)adt_getprop(adt, sgx, "compatible", &compat_len);
++        assert(compat && compat_len == sizeof("gpu,t6034"));
++        compat[0] = 'x';
++    }
++    if (scenario == IMAGE_DUPLICATE)
++        assert(fdt_add_subnode(dt, fdt_path_offset(dt, "/chosen"),
++                               "asahi,t6034-gpu-image") >= 0);
++    const struct adt_segment_ranges *segments = adt_segs("/arm-io/gfx-asc", &n);
++    assert(n == 2);
++    if (scenario == IMAGE_NO_MCC_INVENTORY)
++        mcc_carveouts_valid = false;
++    if (scenario == IMAGE_PROTECTED_HEADER) {
++        mcc_carveout_count = 1;
++        mcc_carveouts[0] = (struct mcc_carveout){segments[0].phys + 0x4000, 0x4000};
++    }
++    if (scenario == IMAGE_BAD_HEADER) {
++        u32 zero = 0;
++        memcpy(dram_at(segments[0].phys + 0x4200, sizeof(zero)), &zero, sizeof(zero));
++    }
++    if (scenario == IMAGE_READ_FAULT)
++        inject_dram_fault = segments[0].phys + 0x4200;
++    if (scenario == IMAGE_RTKIT_FAULT)
++        inject_dram_fault = segments[0].phys + 0x5c100;
++    nwrites = gpu_reads = ps_reads = dram_reads = 0;
++    assert(dt_set_gpu(dt) == 0);
++    check(!nwrites && !gpu_reads && !ps_reads, "image-only: no PMGR or GPU access");
++    check(!unguarded, "image-only: no unguarded fault");
++    check(!strcmp(status_of(dt, "gpu"), scenario == IMAGE_ENABLED_GPU ? "okay" : "disabled"),
++          "image-only: GPU status unchanged");
++    if (scenario == IMAGE_OK || scenario == IMAGE_RTKIT_FAULT) {
++        const void *uuid = prop(dt, image, "image-uuid", &len);
++        check(uuid && len == 16 && !memcmp(uuid, sim_image_uuid, 16),
++              "image-only: simulated firmware identity published");
++        check(dram_reads > 0, "image-only: simulated firmware memory was read");
++        if (scenario == IMAGE_RTKIT_FAULT) {
++            check(u32_is(dt, image, "rtkit-version-present", 0),
++                  "image-only: faulted RTKit version is absent");
++            check(dram_reads == 2 * GFX_FW_HDR_SIZE / 4,
++                  "image-only: no byte reads after the first RTKit fault");
++            check(exc_count > 0, "image-only: RTKit read fault was guarded");
++        }
++    } else {
++        check(!prop(dt, image, "image-uuid", NULL), "image-only: no identity on refusal");
++        if (scenario == IMAGE_UNARMED || scenario == IMAGE_WRONG_BOARD ||
++            scenario == IMAGE_WRONG_NODE || scenario == IMAGE_DUPLICATE ||
++            scenario == IMAGE_DISABLED_OPTION || scenario == IMAGE_ENABLED_GPU ||
++            scenario == IMAGE_WRONG_ADT || scenario == IMAGE_NO_MCC_INVENTORY ||
++            scenario == IMAGE_PROTECTED_HEADER)
++            check(!dram_reads, "image-only: refusal precedes firmware memory read");
++        if (scenario == IMAGE_READ_FAULT) {
++            check(exc_count > 0, "image-only: firmware read fault was guarded");
++            check(!dram_reads, "image-only: no later header read after the first fault");
++        }
++    }
++}
++
++static void sc_j514m_image_ok(void *dt) { sc_j514m_image_only(dt, IMAGE_OK); }
++static void sc_j514m_image_unarmed(void *dt) { sc_j514m_image_only(dt, IMAGE_UNARMED); }
++static void sc_j514m_image_wrong_board(void *dt) { sc_j514m_image_only(dt, IMAGE_WRONG_BOARD); }
++static void sc_j514m_image_wrong_node(void *dt) { sc_j514m_image_only(dt, IMAGE_WRONG_NODE); }
++static void sc_j514m_image_bad_header(void *dt) { sc_j514m_image_only(dt, IMAGE_BAD_HEADER); }
++static void sc_j514m_image_fault(void *dt) { sc_j514m_image_only(dt, IMAGE_READ_FAULT); }
++static void sc_j514m_image_rtkit_fault(void *dt) { sc_j514m_image_only(dt, IMAGE_RTKIT_FAULT); }
++static void sc_j514m_image_duplicate(void *dt) { sc_j514m_image_only(dt, IMAGE_DUPLICATE); }
++static void sc_j514m_image_option_zero(void *dt) { sc_j514m_image_only(dt, IMAGE_DISABLED_OPTION); }
++static void sc_j514m_image_enabled_gpu(void *dt) { sc_j514m_image_only(dt, IMAGE_ENABLED_GPU); }
++static void sc_j514m_image_wrong_adt(void *dt) { sc_j514m_image_only(dt, IMAGE_WRONG_ADT); }
++static void sc_j514m_image_no_mcc(void *dt) { sc_j514m_image_only(dt, IMAGE_NO_MCC_INVENTORY); }
++static void sc_j514m_image_protected(void *dt) { sc_j514m_image_only(dt, IMAGE_PROTECTED_HEADER); }
++
+ static void sc_other_board(void *dt)
+ {
+     static u8 before[1 << 21];
+@@ -1103,6 +1497,34 @@ static void sc_mask_beyond_40(void *dt)
+     sim_mask[1] = 0xff;
+ }
+ 
++static void sc_slots_mismatch(void *dt)
++{
++    world(&(struct opts){0});
++    sim_counts1 = 0x00010409; /* nine slots per cluster, not the assumed ten */
++    reg_set(SGX + 0xd04010, sim_counts1, R_GPU);
++    run(dt);
++    check_identity(dt, T8122_ID_MISMATCH, true);
++    check_gpu_refused(dt);
++    expect_power_restored();
++    sim_counts1 = 0x0001040a;
++}
++
++static void sc_thirty_core_layout(void *dt)
++{
++    /* Synthetic 8/8/7/7 mask, independent of any Mac's actual fuse bits. */
++    u64 mask = 0xffULL | (0xffULL << 10) | (0x7fULL << 20) | (0x7fULL << 30);
++    struct t8122_powered_identity id = {
++        .id_version = 0x07041100, .id_counts_1 = 0x0021040a,
++        .core_mask = {(u32)mask, (u32)(mask >> 32), 0},
++    };
++    u32 counts[T6031_GPU_CLUSTERS] = {0};
++    UNUSED(dt);
++    check(t6031_identity_valid(&id), "30-core G15C identity accepted");
++    u32 total = t6031_core_counts(&id, counts);
++    check(total == 30 && counts[0] == 8 && counts[1] == 8 && counts[2] == 7 && counts[3] == 7,
++          "30-core mask decoded into four clusters (8/8/7/7)");
++}
++
+ static void sc_power_on_timeout(void *dt)
+ {
+     world(&(struct opts){0});
+@@ -1224,11 +1646,51 @@ static const struct {
+     {"publish", sc_publish_quiet},
+     {"publish-dump", sc_publish_dump},
+     {"t6034", sc_t6034},
++    {"j514m-publish", sc_j514m_publish},
++    {"j514m-power-off", sc_j514m_power_off},
++    {"j514m-power-fault", sc_j514m_power_fault},
++    {"j514m-missing-fe", sc_j514m_missing_fe},
++    {"j514m-missing-cpu", sc_j514m_missing_cpu},
++    {"j514m-wrong-image", sc_j514m_wrong_image},
++    {"j514m-wrong-os", sc_j514m_wrong_os},
++    {"j514m-gpu-power", sc_j514m_gpu_power},
++    {"j514m-gpu-timeout", sc_j514m_gpu_timeout},
++    {"j514m-gpu-tables", sc_j514m_gpu_tables},
++    {"j514m-gpu-bad-count", sc_j514m_gpu_bad_count},
++    {"j514m-gpu-bad-sram", sc_j514m_gpu_bad_sram},
++    {"j514m-probe-ok", sc_j514m_probe_ok},
++    {"j514m-probe-unarmed", sc_j514m_probe_unarmed},
++    {"j514m-probe-wrong-board", sc_j514m_probe_wrong_board},
++    {"j514m-probe-timeout", sc_j514m_probe_timeout},
++    {"j514m-probe-fault", sc_j514m_probe_fault},
++    {"j514m-probe-restore-fail", sc_j514m_probe_restore_fail},
++    {"j514m-probe-wrong-node", sc_j514m_probe_wrong_node},
++    {"j514m-probe-duplicate", sc_j514m_probe_duplicate},
++    {"j514m-probe-ps-write-fault", sc_j514m_probe_ps_write_fault},
++    {"j514m-probe-ps-poll-fault", sc_j514m_probe_ps_poll_fault},
++    {"j514m-probe-ps-read-fault", sc_j514m_probe_ps_read_fault},
++    {"j514m-probe-keep-parent", sc_j514m_probe_keep_parent},
++    {"j514m-probe-bad-image", sc_j514m_probe_bad_image},
++    {"j514m-image-ok", sc_j514m_image_ok},
++    {"j514m-image-unarmed", sc_j514m_image_unarmed},
++    {"j514m-image-wrong-board", sc_j514m_image_wrong_board},
++    {"j514m-image-wrong-node", sc_j514m_image_wrong_node},
++    {"j514m-image-bad-header", sc_j514m_image_bad_header},
++    {"j514m-image-fault", sc_j514m_image_fault},
++    {"j514m-image-rtkit-fault", sc_j514m_image_rtkit_fault},
++    {"j514m-image-duplicate", sc_j514m_image_duplicate},
++    {"j514m-image-option-zero", sc_j514m_image_option_zero},
++    {"j514m-image-enabled-gpu", sc_j514m_image_enabled_gpu},
++    {"j514m-image-wrong-adt", sc_j514m_image_wrong_adt},
++    {"j514m-image-no-mcc", sc_j514m_image_no_mcc},
++    {"j514m-image-protected", sc_j514m_image_protected},
+     {"other-board", sc_other_board},
+     {"dcp-not-armed", sc_dcp_not_armed},
+     {"gpu-off", sc_gpu_off},
+     {"identity-fault", sc_identity_fault},
+     {"identity-mismatch", sc_identity_mismatch},
++    {"slots-mismatch", sc_slots_mismatch},
++    {"thirty-core-layout", sc_thirty_core_layout},
+     {"mask-beyond-40", sc_mask_beyond_40},
+     {"power-on-timeout", sc_power_on_timeout},
+     {"power-off-fails", sc_power_off_fails},
+@@ -1249,10 +1711,19 @@ int main(int argc, char **argv)
+         return 2;
+     }
+     if (!strcmp(argv[3], "list")) {
+-        for (size_t i = 0; i < ARRAY_SIZE(scenarios); i++)
++        for (size_t i = 0; i < ARRAY_SIZE(scenarios); i++) {
++            if (!strncmp(scenarios[i].name, "j514m-", 6) &&
++                (!getenv("J514M_TEST") || strcmp(getenv("J514M_TEST"), "1")))
++                continue;
+             printf("%s\n", scenarios[i].name);
++        }
+         return 0;
+     }
++    if (!strncmp(argv[3], "j514m-", 6) &&
++        (!getenv("J514M_TEST") || strcmp(getenv("J514M_TEST"), "1"))) {
++        fprintf(stderr, "J514M scenarios require J514M_TEST=1 and a J514M ADT allowlist\n");
++        return 2;
++    }
+     FILE *f = fopen(argv[1], "rb");
+     assert(f);
+     adt_blob = malloc(1 << 22);
+diff --git a/tests/t8122_display_host.c b/tests/t8122_display_host.c
+index 6cabf31..e2725d1 100644
+--- a/tests/t8122_display_host.c
++++ b/tests/t8122_display_host.c
+@@ -59,6 +59,7 @@ volatile int exc_count;
+ struct fw_version_info os_firmware = {V14_7, "14.7", {14, 7, 0}, 3, "iBoot-10151.140.19.700.2"};
+ size_t mcc_carveout_count;
+ struct mcc_carveout mcc_carveouts[8];
++bool mcc_carveouts_valid;
+ static u64 ram_base, ram_size, fb_base;
+ 
+ u64 kboot_ram_base(void)
+@@ -288,7 +289,7 @@ struct region {
+     u8 *buf;
+ };
+ static struct region regions[16];
+-static int nregions, mmio_writes;
++static int nregions, mmio_reads, mmio_writes;
+ 
+ static void region_add(u64 base, u64 size)
+ {
+@@ -332,6 +333,7 @@ static void fault(const char *what, u64 a)
+ 
+ u32 read32(u64 a)
+ {
++    mmio_reads++;
+     u8 *p = mem(a, 4);
+     u32 v = 0;
+     if (!p)
+@@ -343,6 +345,7 @@ u32 read32(u64 a)
+ 
+ u64 read64(u64 a)
+ {
++    mmio_reads++;
+     u8 *p = mem(a, 8);
+     u64 v = 0;
+     if (!p)
+@@ -984,7 +987,7 @@ int main(int argc, char **argv)
+     fw25 = !t6030 && getenv("J613_25G83") != NULL;
+     struct opts o = {0};
+     bool publish = true;
+-    if (!strcmp(sc, "unarmed")) {
++    if (!strcmp(sc, "unarmed") || !strncmp(sc, "t6034-", 6)) {
+         publish = false;
+     } else if (!strcmp(sc, "publish") || !strcmp(sc, "contract-selftest")) {
+         o.armed = true;
+@@ -1019,6 +1022,32 @@ int main(int argc, char **argv)
+     if (fdt_open_into(in, dt, fdt_totalsize(in) + 128 * 1024))
+         return 2;
+ 
++    /* T6034 selection and refusal happen before any ADT or register access. */
++    if (!strncmp(sc, "t6034-", 6)) {
++        const char j514m[] = "apple,j514m\0apple,t6034\0apple,arm-platform";
++        const char j516m[] = "apple,j516m\0apple,t6034\0apple,arm-platform";
++        bool unarmed = !strcmp(sc, "t6034-unarmed");
++        bool wrong_board = !strcmp(sc, "t6034-wrong-board");
++        bool wrong_chip = !strcmp(sc, "t6034-wrong-chip");
++        if (!unarmed && !wrong_board && !wrong_chip)
++            return 2;
++        chip_id = wrong_chip ? T6031 : T6034;
++        const char *compatible = wrong_board ? j516m : j514m;
++        int size = wrong_board ? sizeof(j516m) : sizeof(j514m);
++        if (fdt_setprop(dt, 0, "compatible", compatible, size) ||
++            (!unarmed && fdt_setprop_string(dt, fdt_path_offset(dt, "/chosen"),
++                                             "asahi,t6034-dcp", "1")))
++            return 2;
++        static u8 before[1 << 20];
++        memcpy(before, dt, fdt_totalsize(dt));
++        int ret = dt_set_display_handoff(dt);
++        check(ret == 0, "T6034 refusal returns success");
++        check(mmio_reads == 0 && mmio_writes == 0, "T6034 refusal touches no MMIO");
++        check(!memcmp(before, dt, fdt_totalsize(dt)), "T6034 refusal leaves the DT unchanged");
++        printf("%s: %s\n", sc, failures ? "FAIL" : "pass");
++        return failures ? 1 : 0;
++    }
++
+     if (t6030)
+         world_t6030(&o);
+     else
+diff --git a/tests/t8122_display_host/mcc.h b/tests/t8122_display_host/mcc.h
+index 8198386..2ba391d 100644
+--- a/tests/t8122_display_host/mcc.h
++++ b/tests/t8122_display_host/mcc.h
+@@ -9,4 +9,5 @@ struct mcc_carveout {
+ };
+ extern size_t mcc_carveout_count;
+ extern struct mcc_carveout mcc_carveouts[];
++extern bool mcc_carveouts_valid;
+ #endif
+diff --git a/tests/t8122_display_host/soc.h b/tests/t8122_display_host/soc.h
+index 4275b01..002c0a7 100644
+--- a/tests/t8122_display_host/soc.h
++++ b/tests/t8122_display_host/soc.h
+@@ -5,4 +5,5 @@
+ #define T6030 0x6030
+ #define T8122 0x8122
+ #define T6031 0x6031
++#define T6034 0x6034
+ #endif

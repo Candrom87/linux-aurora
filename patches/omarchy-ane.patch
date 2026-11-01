@@ -1,0 +1,139 @@
+diff --git a/ane/h15/ane_h15_adt.h b/ane/h15/ane_h15_adt.h
+index 4945443..112cedf 100644
+--- a/ane/h15/ane_h15_adt.h
++++ b/ane/h15/ane_h15_adt.h
+@@ -51,7 +51,8 @@ struct ane_h15_adt_node {
+ struct ane_h15_seg {
+ 	u64 phys;	/* segment-ranges word 0 */
+ 	u64 iova;	/* the ASC-side address (remap; word 1 or 2) */
+-	u64 size;	/* last word */
++	u64 size;	/* 24-byte row: word 2; 32-byte row: low 32 bits of word 3 */
++	u32 flags;	/* 32-byte row: high 32 bits of word 3; 0 for 24-byte rows */
+ };
+ 
+ static inline u32 ane_h15_adt_pad4(u32 n) { return (n + 3u) & ~3u; }
+@@ -185,6 +186,7 @@ static int ane_h15_adt_child_named(const struct ane_h15_adt *a,
+ 				   struct ane_h15_adt_node *out)
+ {
+ 	unsigned int i;
++	size_t name_len = strlen(name);
+ 
+ 	for (i = 0; i < parent.nchildren; i++) {
+ 		struct ane_h15_adt_node c;
+@@ -202,8 +204,7 @@ static int ane_h15_adt_child_named(const struct ane_h15_adt *a,
+ 			continue;
+ 		/* ADT name props are NUL-terminated (size counts the
+ 		 * NUL): match the whole string, reject a mere prefix. */
+-		if (size > 0 && strncmp((const char *)nm, name, strlen(name)) == 0 &&
+-		    nm[strlen(name)] == 0) {
++		if (size > name_len && !memcmp(nm, name, name_len) && nm[name_len] == 0) {
+ 			*out = c;
+ 			return ANE_H15_OK;
+ 		}
+@@ -260,7 +261,10 @@ static inline int ane_h15_adt_find_ane(const struct ane_h15_adt *a, u32 ane_type
+ }
+ 
+ /* Decode "segment-ranges": either two {phys, iova, size} entries (24
+- * bytes each) or two {phys, x, iova, size} entries (32). The caller
++ * bytes each) or two {phys, x, iova, u32 size, u32 flags} entries (32).
++ * The latter matches m1n1 src/adt.h struct adt_segment_ranges at
++ * bc79acc434e612ffcb95bfc7cb2fd7543afac5f2 and h15-segments.py at
++ * 063ae8e0376ac8e8ca04880bed2a065ce1e321ff. The caller
+  * logs the decoded numbers so a wrong pick is visible. @text_expect
+  * is the pinned TEXT size (0 skips); @data_min the pinned DATA size
+  * floor (0 skips). */
+@@ -294,7 +298,8 @@ static inline int ane_h15_adt_segments(const struct ane_h15_adt *a,
+ 			v[k] = ane_h15_adt_rd64(a, row + 8u * k);
+ 		segs[i].phys = v[0];
+ 		segs[i].iova = stride == 32 ? v[2] : v[1];
+-		segs[i].size = stride == 32 ? v[3] : v[2];
++		segs[i].size = stride == 32 ? (u32)v[3] : v[2];
++		segs[i].flags = stride == 32 ? (u32)(v[3] >> 32) : 0;
+ 		if (!segs[i].phys || !segs[i].iova || !segs[i].size)
+ 			return ANE_H15_EFORMAT;
+ 		if (segs[i].size & (ANE_H15_ADT_PROP_ALIGN - 1))
+diff --git a/ane/h15/ane_h15_adt_test.c b/ane/h15/ane_h15_adt_test.c
+index 419f2ed..cdb57b8 100644
+--- a/ane/h15/ane_h15_adt_test.c
++++ b/ane/h15/ane_h15_adt_test.c
+@@ -58,14 +58,18 @@ static void bprop(struct buf *b, const char *name, const void *data, uint32_t si
+ 	}
+ }
+ 
+-static struct ane_h15_adt build_blob(void)
++static struct ane_h15_adt build_blob(int extended)
+ {
+ 	struct buf b = { 0 };
+ 	uint32_t at = 176;
+-	uint64_t e[6] = {
++	uint64_t compact[6] = {
+ 		0x10000000000ull, 0x10000000000ull, 0xc0000ull,
+ 		0x10000800000ull, 0x10000800000ull, 0x2ac000ull,
+ 	};
++	uint64_t flagged[8] = {
++		0x10000000000ull, 0, 0x10000000000ull, 0x1000c0000ull,
++		0x10000800000ull, 0xc0000, 0x10000800000ull, 0x2ac000ull,
++	};
+ 
+ 	/* root: 0 props, 1 child */
+ 	b32(&b, 0);
+@@ -79,14 +83,17 @@ static struct ane_h15_adt build_blob(void)
+ 	b32(&b, 0);
+ 	bprop(&b, "ane-type", &at, 4);
+ 	bprop(&b, "name", "ane", 4);
+-	bprop(&b, "segment-ranges", e, sizeof(e));
++	if (extended)
++		bprop(&b, "segment-ranges", flagged, sizeof(flagged));
++	else
++		bprop(&b, "segment-ranges", compact, sizeof(compact));
+ 
+ 	return (struct ane_h15_adt){ .b = b.p, .len = b.len };
+ }
+ 
+-int main(void)
++static int test_format(int extended)
+ {
+-	struct ane_h15_adt a = build_blob();
++	struct ane_h15_adt a = build_blob(extended);
+ 	struct ane_h15_adt_node ane;
+ 	struct ane_h15_seg segs[2] = { 0 };
+ 	int err;
+@@ -106,13 +113,36 @@ int main(void)
+ 	}
+ 	if (segs[0].phys != 0x10000000000ull || segs[0].iova != 0x10000000000ull ||
+ 	    segs[0].size != 0xc0000ull || segs[1].phys != 0x10000800000ull ||
+-	    segs[1].iova != 0x10000800000ull || segs[1].size != 0x2ac000ull) {
++	    segs[1].iova != 0x10000800000ull || segs[1].size != 0x2ac000ull ||
++	    segs[0].flags != (extended ? 1u : 0u) || segs[1].flags != 0) {
+ 		fprintf(stderr, "decoded values mismatch\n");
+ 		rc = 1;
+ 		goto out;
+ 	}
+-	puts("test: ane_h15_adt — ok");
+ out:
+ 	free((void *)a.b);
+ 	return rc;
+ }
++
++static int test_truncated_name(void)
++{
++	struct ane_h15_adt a = build_blob(0);
++	struct ane_h15_adt_node root, found;
++	int err = ANE_H15_OK;
++	int ret;
++
++	/* Keep the bytes of "arm-io" but declare only its first byte as data. */
++	((u8 *)a.b)[48] = 1;
++	root = ane_h15_adt_node_at(&a, 0, &err);
++	ret = err ? err : ane_h15_adt_child_named(&a, root, "arm-io", &found);
++	free((void *)a.b);
++	return ret == ANE_H15_ENOENT ? 0 : 1;
++}
++
++int main(void)
++{
++	if (test_format(0) || test_format(1) || test_truncated_name())
++		return 1;
++	puts("test: ane_h15_adt — both segment layouts and truncated-name rejection ok");
++	return 0;
++}
