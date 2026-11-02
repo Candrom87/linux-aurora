@@ -13,6 +13,7 @@
 #include <linux/workqueue.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/overflow.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/scatterlist.h>
@@ -1781,7 +1782,7 @@ int iomfb_v14_7_probe(struct apple_dcp *dcp)
 static int dcp_v14_geometry(struct apple_dcp_v14 *v14)
 {
 	struct device_node *fb = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
-	u32 notch = 0;
+	u32 notch = 0, expected_stride;
 	int ret;
 
 	if (!fb)
@@ -1796,15 +1797,18 @@ static int dcp_v14_geometry(struct apple_dcp_v14 *v14)
 		return ret;
 	of_property_read_u32(v14->dev->of_node, "apple,notch-height", &notch);
 	/* The firmware takes this stride as its default: 4 bytes per pixel. */
-	if (!v14->fb_width || !v14->fb_height || v14->stride != v14->fb_width * 4 ||
+	if (!v14->fb_width || !v14->fb_height ||
+	    check_mul_overflow(v14->fb_width, 4U, &expected_stride) ||
+	    v14->stride != expected_stride ||
 	    notch > MAX_NOTCH_HEIGHT)
 		return -EINVAL;
 	v14->notch_rows = notch;
 	v14->panel_width = v14->fb_width;
-	v14->panel_height = v14->fb_height + notch;
 	/* The boot loader kept the notch rows: the framebuffer is the whole panel. */
 	if (v14->board->panel_height && notch && v14->fb_height == v14->board->panel_height)
 		v14->panel_height = v14->fb_height;
+	else if (check_add_overflow(v14->fb_height, notch, &v14->panel_height))
+		return -EINVAL;
 	/* A board with a known panel takes no other. */
 	if (v14->board->panel_width &&
 	    (v14->panel_width != v14->board->panel_width ||
