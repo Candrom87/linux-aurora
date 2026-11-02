@@ -1,0 +1,226 @@
+commit ab0732d875dada9832ea47987f14e3d8b02a5759
+Author:     Glenn Charpantier <Candrom87@users.noreply.github.com>
+AuthorDate: Mon Nov 2 12:38:42 2026 +0100
+Commit:     Glenn Charpantier <Candrom87@users.noreply.github.com>
+CommitDate: Mon Nov 2 12:38:42 2026 +0100
+
+    drm/apple: invalidate V14 mode on firmware crash
+
+diff --git a/drivers/gpu/drm/apple/iomfb_v14_7.c b/drivers/gpu/drm/apple/iomfb_v14_7.c
+index 925cb0eea..6ca113f20 100644
+--- a/drivers/gpu/drm/apple/iomfb_v14_7.c
++++ b/drivers/gpu/drm/apple/iomfb_v14_7.c
+@@ -1463,11 +1463,16 @@ static void dcp_v14_crashed(void *cookie, const void *crashlog, size_t crashlog_
+ 	struct apple_dcp_v14 *v14 = cookie;
+ 	struct apple_dcp *dcp = READ_ONCE(v14->dcp);
+ 
+-	WRITE_ONCE(v14->failed, true);
+ 	if (dcp) {
+ 		struct apple_connector *connector = READ_ONCE(dcp->connector);
+ 
+-		WRITE_ONCE(dcp->crashed, true);
++		/* Serialize the crash with a modeset accepting its reply. */
++		scoped_guard(spinlock_irqsave, &dcp->mode_state.lock) {
++			WRITE_ONCE(v14->failed, true);
++			WRITE_ONCE(dcp->crashed, true);
++			dcp->mode_state.valid = false;
++			dcp->mode_state.invalidated = true;
++		}
+ 		if (dcp->external)
+ 			dcpext_scanout_fault(dcp, -EIO);
+ 		/* The display it drove is gone until reboot. */
+@@ -1476,7 +1481,8 @@ static void dcp_v14_crashed(void *cookie, const void *crashlog, size_t crashlog_
+ 			apple_connector_edid_set_live(connector, false);
+ 			dcp_queue_hotplug(connector);
+ 		}
+-	}
++	} else
++		WRITE_ONCE(v14->failed, true);
+ 	dev_err(v14->dev, "DCP firmware crashed; its buffers are kept until reboot\n");
+ 	dcp_v14_link_fail(&v14->link);
+ }
+@@ -3217,6 +3223,22 @@ static void dcp_v14_audio_on(struct apple_dcp *dcp)
+ 	av_service_connect(dcp);
+ }
+ 
++/* A crash can arrive after the last RPC and before the mode is accepted. */
++static int dcp_v14_accept_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
++{
++	int ret = 0;
++
++	scoped_guard(spinlock_irqsave, &dcp->mode_state.lock) {
++		if (READ_ONCE(dcp->crashed) || (v14 && READ_ONCE(v14->failed)))
++			ret = -EIO;
++		else if (dcp->mode_state.changing && dcp->mode_state.invalidated)
++			ret = -EAGAIN;
++		else
++			dcp->mode_state.valid = true;
++	}
++	return ret;
++}
++
+ /* An external display: power down, set the new mode, power up. */
+ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state)
+ {
+@@ -3254,8 +3276,10 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
+ 		mutex_unlock(&v14->lock);
+ 		dev_info(dcp->dev, "display mode " DRM_MODE_FMT " (timing %u, color %u) already active and showing\n",
+ 			 DRM_MODE_ARG(&crtc_state->mode), mode.timing_mode_id, mode.color_mode_id);
++		ret = dcp_v14_accept_mode(dcp, v14);
++		if (ret)
++			return ret;
+ 		atomic_set(&dcp->external_retries, 0);
+-		dcp_mode_set_valid(&dcp->mode_state, true);
+ 		if (dcp->avep)
+ 			dcp_v14_audio_on(dcp);
+ 		return 0;
+@@ -3268,6 +3292,8 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
+ 		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
+ 	if (!ret)
+ 		ret = dcp_v14_set_power(v14, true);
++	if (!ret && READ_ONCE(v14->failed))
++		ret = -EIO;
+ 	if (!ret) {
+ 		v14->panel_width = mode.mode.hdisplay;
+ 		v14->panel_height = mode.mode.vdisplay;
+@@ -3292,9 +3318,10 @@ out:
+ 		dcp_external_retry(dcp, "display mode not set", ret, 500);
+ 		return ret;
+ 	}
++	ret = dcp_v14_accept_mode(dcp, v14);
++	if (ret)
++		return ret;
+ 	atomic_set(&dcp->external_retries, 0);
+-	scoped_guard(spinlock_irqsave, &dcp->mode_state.lock)
+-		dcp->mode_state.valid = true;
+ 	/* A472 on: the sink's audio again. */
+ 	if (dcp->avep)
+ 		dcp_v14_audio_on(dcp);
+@@ -3308,9 +3335,7 @@ int iomfb_v14_7_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state
+ 	/* The firmware keeps the timing it booted with, which is the only mode. */
+ 	if (!lookup_mode(dcp, &crtc_state->mode, NULL))
+ 		return -EINVAL;
+-	scoped_guard(spinlock_irqsave, &dcp->mode_state.lock)
+-		dcp->mode_state.valid = true;
+-	return 0;
++	return dcp_v14_accept_mode(dcp, dcp->v14);
+ }
+ 
+ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
+diff --git a/tools/asahi/dcp-v14-crash-state.py b/tools/asahi/dcp-v14-crash-state.py
+new file mode 100644
+index 000000000..14c314c07
+--- /dev/null
++++ b/tools/asahi/dcp-v14-crash-state.py
+@@ -0,0 +1,111 @@
++#!/usr/bin/env python3
++"""Exercise the V14 crash and mode-accept functions with fake devices."""
++from pathlib import Path
++import subprocess
++import tempfile
++
++root = Path(__file__).resolve().parents[2]
++source = (root / 'drivers/gpu/drm/apple/iomfb_v14_7.c').read_text()
++
++
++def extract(signature):
++    start = source.index(signature)
++    brace = source.index('{', start)
++    depth = 0
++    for pos in range(brace, len(source)):
++        if source[pos] == '{':
++            depth += 1
++        elif source[pos] == '}':
++            depth -= 1
++            if depth == 0:
++                return source[start:pos + 1]
++    raise ValueError('unterminated function ' + signature)
++
++
++code = r'''
++#include <assert.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <errno.h>
++#include <pthread.h>
++#include <stdio.h>
++
++struct dcp_mode_state { pthread_mutex_t lock; bool valid, invalidated, changing; };
++struct apple_connector { bool connected; };
++struct apple_dcp { struct dcp_mode_state mode_state; struct apple_connector *connector;
++                   bool crashed, external, external_detached; };
++struct dcp_v14_link { bool failed; };
++struct apple_dcp_v14 { struct apple_dcp *dcp; struct dcp_v14_link link;
++                       bool failed, external; void *dev; };
++static int faults, hotplugs, edid_stops;
++#define READ_ONCE(x) (x)
++#define WRITE_ONCE(x, y) ((x) = (y))
++#define scoped_guard(kind, lock_ptr) \
++    for (int once = (pthread_mutex_lock(lock_ptr), 1); once; \
++         once = 0, pthread_mutex_unlock(lock_ptr))
++#define dev_err(...) ((void)0)
++static void dcpext_scanout_fault(struct apple_dcp *d, int err)
++{ assert(d && err == -EIO); faults++; }
++static void apple_connector_edid_set_live(struct apple_connector *c, bool live)
++{ assert(c && !live); edid_stops++; }
++static void dcp_queue_hotplug(struct apple_connector *c) { assert(c); hotplugs++; }
++static void dcp_v14_link_fail(struct dcp_v14_link *l) { l->failed = true; }
++CRASH
++ACCEPT
++
++struct race { struct apple_dcp *dcp; struct apple_dcp_v14 *v14; int ret; };
++static void *accept_thread(void *p) {
++    struct race *r = p; r->ret = dcp_v14_accept_mode(r->dcp, r->v14); return NULL;
++}
++static void *crash_thread(void *p) {
++    struct race *r = p; dcp_v14_crashed(r->v14, NULL, 0); return NULL;
++}
++int main(void) {
++    struct apple_dcp d = {.mode_state.lock = PTHREAD_MUTEX_INITIALIZER};
++    struct apple_dcp_v14 v = {.dcp = &d};
++    assert(dcp_v14_accept_mode(&d, &v) == 0 && d.mode_state.valid);
++    d.mode_state.changing = true;
++    dcp_v14_crashed(&v, NULL, 0);
++    assert(v.failed && v.link.failed && d.crashed);
++    assert(!d.mode_state.valid && d.mode_state.invalidated);
++    assert(dcp_v14_accept_mode(&d, &v) == -EIO && !d.mode_state.valid);
++    d.mode_state.invalidated = false; /* begin cannot revive a crashed session */
++    assert(dcp_v14_accept_mode(&d, &v) == -EIO && !d.mode_state.valid);
++
++    d.crashed = false; v.failed = false; d.mode_state.invalidated = true;
++    assert(dcp_v14_accept_mode(&d, &v) == -EAGAIN && !d.mode_state.valid);
++    d.mode_state.changing = false; /* preserve idle acceptance semantics */
++    assert(dcp_v14_accept_mode(&d, &v) == 0 && d.mode_state.valid);
++    struct apple_dcp_v14 detached = {0};
++    dcp_v14_crashed(&detached, NULL, 0);
++    assert(detached.failed && detached.link.failed);
++
++    struct apple_connector con = {.connected = true};
++    d.connector = &con; d.external = true; v.external = true;
++    dcp_v14_crashed(&v, NULL, 0);
++    assert(!con.connected && faults == 1 && hotplugs == 1 && edid_stops == 1);
++
++    /* Either lock order is allowed; after both finish the mode is invalid. */
++    d.connector = NULL; d.external = false; v.external = false;
++    for (int i = 0; i < 250; ++i) {
++        d.crashed = false; v.failed = false; d.mode_state.valid = false;
++        d.mode_state.invalidated = false; d.mode_state.changing = true;
++        struct race r = {&d, &v, 0}; pthread_t a, b;
++        assert(!pthread_create(&a, NULL, accept_thread, &r));
++        assert(!pthread_create(&b, NULL, crash_thread, &r));
++        assert(!pthread_join(a, NULL)); assert(!pthread_join(b, NULL));
++        assert((r.ret == 0 || r.ret == -EIO) && !d.mode_state.valid);
++        assert(d.mode_state.invalidated && d.crashed && v.failed);
++    }
++    puts("V14 crash state and 250 concurrent mode-accept races passed (fake devices)");
++}
++'''.replace('CRASH', extract('static void dcp_v14_crashed(')).replace(
++    'ACCEPT', extract('static int dcp_v14_accept_mode('))
++
++with tempfile.TemporaryDirectory(prefix='dcp-v14-crash-') as tmp:
++    cfile = Path(tmp) / 'test.c'
++    binary = Path(tmp) / 'test'
++    cfile.write_text(code)
++    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Wno-unused-parameter',
++                    '-Werror', '-pthread', str(cfile), '-o', str(binary)], check=True)
++    subprocess.run([str(binary)], check=True)
