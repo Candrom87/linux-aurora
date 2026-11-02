@@ -610,6 +610,12 @@ impl gpuvm::DriverGpuVm for VmInner {
             assert!(offset == 0);
 
             if one_page {
+                // Repetition needs a complete GPU page at this offset, even
+                // when the requested virtual span is larger than one page.
+                if len < UAT_PGSZ {
+                    self.rollback_failed_map(map_addr, map_length as u64);
+                    return Err(EFAULT);
+                }
                 len = left;
             } else {
                 len = len.min(left);
@@ -639,6 +645,12 @@ impl gpuvm::DriverGpuVm for VmInner {
         }
 
         drop(segments);
+        // A short or empty DMA segment list must not acquire a GPUVA owner
+        // after installing only a prefix (or none) of the requested leaves.
+        if left != 0 {
+            self.rollback_failed_map(map_addr, map_length as u64);
+            return Err(EFAULT);
+        }
         let gpuva = match ctx.preallocated_gpuva() {
             Ok(gpuva) => gpuva,
             Err(error) => {
