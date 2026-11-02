@@ -27,6 +27,10 @@ def block(text, signature):
 
 prepare=block(source,'pub(crate) fn prepare_bind_object(')
 coverage=block(mmu,'fn covers(&self, mut offset: u64, size: u64, repeat: bool)')
+override = os.environ.get('ASAHI_TEST_COVERAGE_SOURCE')
+if override:
+    coverage=block(Path(override).read_text(),
+                   'fn covers(&self, mut offset: u64, size: u64, repeat: bool)')
 guard='''        // Reject short backing before GPUVM can remove an overlapping mapping.
         if !vm_bo.data().segments.lock().as_ref().ok_or(EFAULT)?.covers(offset, size, single_page) {
             return Err(EFAULT);
@@ -90,7 +94,7 @@ fn run(segments:&[(u64,u64)],size:u64,repeat:bool,expect:Result) {
  let mut existing_mapping=true; let mut commits=0;
  let result=vm.prepare_bind_object(&gem::Object,0x4000,size,0,(),repeat);
  let outcome=match result {Ok(_)=>{existing_mapping=false;commits+=1;Ok(())},Err(e)=>Err(e)};
- assert_eq!(outcome,expect);
+ assert_eq!(outcome,expect,"segments={segments:?} size={size} repeat={repeat}");
  if expect.is_err() {assert!(existing_mapping);assert_eq!(commits,0)}
  else {assert!(!existing_mapping);assert_eq!(commits,1)}
 }
@@ -99,9 +103,13 @@ fn main(){
  run(&[],p,false,Err(EFAULT));
  run(&[(p,p)],2*p,false,Err(EFAULT));
  run(&[(p,p/2)],2*p,true,Err(EFAULT));
+ run(&[(p+1,p)],p,false,Err(EFAULT));
+ run(&[(p,p/2),(3*p,p)],p,false,Err(EFAULT));
+ run(&[(u64::MAX-p+1,p)],p,false,Err(EFAULT));
+ run(&[(u64::MAX-p+1,p)],p,true,Err(EFAULT));
  run(&[(p,p),(3*p,p)],2*p,false,Ok(()));
  run(&[(p,p)],2*p,true,Ok(()));
- println!("actual prepared-bind guard rejects short backing before simulated commit");
+ println!("actual prepared-bind guard rejects short or misaligned backing before simulated commit");
 }
 '''.replace('COVERAGE',coverage).replace('PREPARE',prepare)
 env=dict(os.environ)

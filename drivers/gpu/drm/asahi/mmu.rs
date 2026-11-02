@@ -465,28 +465,40 @@ impl SgSegments {
         self.segments.iter()
     }
 
-    /// Whether the mapping loop can cover this span from the retained segments.
+    /// Whether the mapping loop can cover this span with page-aligned segments.
     /// A repeated mapping needs one complete page in a single DMA segment.
     fn covers(&self, mut offset: u64, size: u64, repeat: bool) -> bool {
-        if size == 0 {
+        let mask = UAT_PGMSK as u64;
+        if size == 0 || size & mask != 0 {
             return false;
         }
-        let mut left = if repeat { UAT_PGSZ as u64 } else { size };
-        for &(_, length) in self.iter() {
+        let mut left = size;
+        for &(address, length) in self.iter() {
             let length = length as u64;
             if offset >= length {
                 offset -= length;
                 continue;
             }
             let available = length - offset;
+            let Some(physical) = (address as u64).checked_add(offset) else {
+                return false;
+            };
             offset = 0;
-            if available >= left {
-                return true;
-            }
-            if repeat {
+            if physical & mask != 0 {
                 return false;
             }
-            left -= available;
+            if repeat {
+                return available >= UAT_PGSZ as u64
+                    && physical.checked_add(UAT_PGSZ as u64).is_some();
+            }
+            let mapped = available.min(left);
+            if mapped & mask != 0 || physical.checked_add(mapped).is_none() {
+                return false;
+            }
+            if mapped == left {
+                return true;
+            }
+            left -= mapped;
         }
         false
     }

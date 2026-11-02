@@ -38,7 +38,8 @@ use std::cell::{Ref,RefCell};
 use std::ops::Range;
 type Result<T=()> = std::result::Result<T,i32>;
 type PhysicalAddr = u64;
-const EFAULT:i32=14; const ENODEV:i32=19; const UAT_PGSZ:usize=0x4000;
+const EFAULT:i32=14; const EINVAL:i32=22; const ENODEV:i32=19; const UAT_PGSZ:usize=0x4000;
+const UAT_PGMSK:usize=UAT_PGSZ-1;
 macro_rules! mod_dev_dbg {($($x:tt)*)=>{}}
 mod gpuvm { pub enum GpuVaFlag { REPEAT } }
 struct Flags(bool);
@@ -63,6 +64,7 @@ struct Ctx {dev:Option<()>,prot:()}
 #[derive(Default)] struct Table {maps:Vec<(Range<u64>,u64,bool)>,fail:bool}
 impl Table {
  fn map_pages(&mut self,r:Range<u64>,p:u64,_:(),repeat:bool)->Result {
+    if (r.start|r.end|p) & UAT_PGMSK as u64 != 0 {return Err(EINVAL)}
     self.maps.push((r,p,repeat)); if self.fail {Err(EFAULT)} else {Ok(())}
  }
 }
@@ -90,10 +92,14 @@ fn main() {
     (vec![(p,p),(3*p,p)],p,p,false,true), (vec![(p,p)],p,p,false,false),
     (vec![(p,p/2),(3*p,p)],0,2*p,true,false),
     (vec![(p,p)],0,2*p,true,true), (vec![(p,p)],0,0,true,false),
-    (vec![(p,u64::MAX)],u64::MAX-1,1,false,true),
+    (vec![(p,u64::MAX)],u64::MAX-1,1,false,false),
+    (vec![(p+1,p)],0,p,false,false), (vec![(p,p/2),(3*p,p)],0,p,false,false),
+    (vec![(u64::MAX-p+1,2*p)],p,p,false,false),
+    (vec![(u64::MAX-p+1,p)],0,p,false,false),
+    (vec![(u64::MAX-p+1,p)],0,p,true,false),
  ] {assert_eq!(SgSegments(segs).covers(offset,size,repeat),expected);}
  // Compare the real preflight and mapping loop on a range of synthetic
- // segment shapes. The fake table accepts writes and does not check alignment.
+ // segment shapes. The fake table checks alignment but does not map RAM.
  for first in [0,p/2,p,2*p] { for second in [0,p/2,p,2*p] {
   let segs=vec![(p,first),(4*p,second)];
   for offset in [0,p,2*p] { for size in [p,2*p,3*p] { for repeat in [false,true] {
