@@ -24,7 +24,7 @@
 void asahi_g15_sha256(const u8 *data, size_t len, u8 *out);
 bool asahi_g15_board(void);
 bool asahi_g15_machine(const char *compatible);
-void asahi_g15_hold_power(struct device *dev);
+int asahi_g15_hold_power(struct device *dev);
 void asahi_g15_release_power(struct device *dev);
 bool asahi_g15_module_try_get(void);
 void asahi_g15_module_put(void);
@@ -223,11 +223,18 @@ bool asahi_g15_machine(const char *compatible)
  * firmware session itself; released only by a start that failed before the
  * firmware was touched (asahi_g15_release_power()).
  */
-void asahi_g15_hold_power(struct device *dev)
+int asahi_g15_hold_power(struct device *dev)
 {
+	int ret;
+
 	pm_runtime_get_noresume(dev);
-	pm_runtime_set_active(dev);
+	ret = pm_runtime_set_active(dev);
+	if (ret) {
+		pm_runtime_put_noidle(dev);
+		return ret;
+	}
 	pm_runtime_enable(dev);
+	return 0;
 }
 
 /*

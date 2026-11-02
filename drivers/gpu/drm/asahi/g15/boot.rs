@@ -59,7 +59,7 @@ pub(crate) mod glue {
         fn asahi_g15_sha256(data: *const u8, len: usize, out: *mut u8);
         fn asahi_g15_board() -> bool;
         fn asahi_g15_machine(compatible: *const core::ffi::c_char) -> bool;
-        fn asahi_g15_hold_power(dev: *mut core::ffi::c_void);
+        fn asahi_g15_hold_power(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
         fn asahi_g15_release_power(dev: *mut core::ffi::c_void);
         fn asahi_g15_module_try_get() -> bool;
         fn asahi_g15_module_put();
@@ -106,9 +106,13 @@ pub(crate) mod glue {
     }
 
     /// Holds the GFX power domain for the retained session.
-    pub(crate) fn hold_power(dev: &device::Device) {
+    pub(crate) fn hold_power(dev: &device::Device) -> Result {
         // SAFETY: `dev` is a valid device; runtime-PM accounting on it has no other requirement.
-        unsafe { asahi_g15_hold_power(dev.as_raw().cast()) };
+        let ret = unsafe { asahi_g15_hold_power(dev.as_raw().cast()) };
+        if ret != 0 {
+            return Err(Error::from_errno(ret));
+        }
+        Ok(())
     }
 
     /// Gives the GFX power domain hold back after a start that touched nothing firmware-visible.
@@ -521,8 +525,15 @@ pub(crate) fn admit(
     let board_images = initdata::prepare_board(dev, cfg, &adt)?;
     let regs = regs::Regs::new(pdev)?;
     // Keep the GFX domain powered for the whole (retained) session.
-    glue::hold_power(dev);
-    dev_info!(dev, "{} admitted, ASC={:#x}\n", cfg.name, regs.asc_control()?);
+    glue::hold_power(dev)?;
+    let control = match regs.asc_control() {
+        Ok(control) => control,
+        Err(error) => {
+            glue::release_power(dev);
+            return Err(error);
+        }
+    };
+    dev_info!(dev, "{} admitted, ASC={:#x}\n", cfg.name, control);
     Ok(Admitted { regs, adt, board_images })
 }
 
