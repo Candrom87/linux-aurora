@@ -464,6 +464,32 @@ impl SgSegments {
     fn iter(&self) -> core::slice::Iter<'_, (DmaAddress, ResourceSize)> {
         self.segments.iter()
     }
+
+    /// Whether the mapping loop can cover this span from the retained segments.
+    /// A repeated mapping needs one complete page in a single DMA segment.
+    fn covers(&self, mut offset: u64, size: u64, repeat: bool) -> bool {
+        if size == 0 {
+            return false;
+        }
+        let mut left = if repeat { UAT_PGSZ as u64 } else { size };
+        for &(_, length) in self.iter() {
+            let length = length as u64;
+            if offset >= length {
+                offset -= length;
+                continue;
+            }
+            let available = length - offset;
+            offset = 0;
+            if available >= left {
+                return true;
+            }
+            if repeat {
+                return false;
+            }
+            left -= available;
+        }
+        false
+    }
 }
 
 /// Preallocated resources needed to execute a VM operation.

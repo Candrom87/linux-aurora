@@ -92,6 +92,10 @@ impl Vm {
         if (addr | size | offset) & UAT_PGMSK as u64 != 0 {
             return Err(EINVAL);
         }
+        // Reject short backing before GPUVM can remove an overlapping mapping.
+        if !vm_bo.data().segments.lock().as_ref().ok_or(EFAULT)?.covers(offset, size, single_page) {
+            return Err(EFAULT);
+        }
         Ok(PreparedUserMap {
             _residency: residency,
             _sg_lease: sg_lease,
