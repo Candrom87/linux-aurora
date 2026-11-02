@@ -16,6 +16,23 @@ source = (kernel/'drivers/gpu/drm/asahi/mmu.rs').read_text()
 start = source.index('        let (map_addr, map_length) = (op.addr(), op.length() as usize);')
 end = source.index('        let gpuva = match ctx.preallocated_gpuva()', start)
 loop = source[start:end]
+if os.environ.get('ASAHI_TEST_WITHOUT_MAP_OVERFLOW_CHECKS') == '1':
+    before='''                let Some(next) = addr.checked_add(skip) else {
+                    self.rollback_failed_map(map_addr, map_length as u64);
+                    return Err(EFAULT);
+                };
+                addr = next;'''
+    after='''            // map_pages advances the physical address across ordinary
+            // segments; a repeated mapping still needs one complete page.
+            let physical_len = if one_page { UAT_PGSZ } else { len };
+            if addr.checked_add(physical_len).is_none() {
+                self.rollback_failed_map(map_addr, map_length as u64);
+                return Err(EFAULT);
+            }
+'''
+    if loop.count(before)!=1 or loop.count(after)!=1:
+        raise SystemExit('overflow guards changed; re-audit negative control')
+    loop=loop.replace(before,'                addr += skip;',1).replace(after,'',1)
 signature = '    fn covers(&self, mut offset: u64, size: u64, repeat: bool) -> bool {'
 if source.count(signature) != 1:
     raise SystemExit('segment coverage helper changed; re-audit')
@@ -116,6 +133,9 @@ fn main() {
  check(&[(p,p)],p,p,false,Err(EFAULT),0,1);
  check(&[(p,p/2)],2*p,0,true,Err(EFAULT),0,1);
  check(&[(p,p)],2*p,0,true,Ok(()),1,0);
+ check(&[(u64::MAX-p+1,p)],p,0,false,Err(EFAULT),0,1);
+ check(&[(u64::MAX-p+1,p)],p,0,true,Err(EFAULT),0,1);
+ check(&[(u64::MAX-p+1,2*p)],p,p,false,Err(EFAULT),0,1);
  let mut vm=Vm::default(); vm.page_table.fail=true;
  assert_eq!(vm.run(&op(&[(p,p)],p,0,false),&Ctx{dev:Some(()),prot:()}),Err(EFAULT));
  assert_eq!(vm.rollbacks,1); assert!(vm.page_table.maps.is_empty());

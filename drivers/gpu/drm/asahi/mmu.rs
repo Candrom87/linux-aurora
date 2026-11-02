@@ -637,7 +637,11 @@ impl gpuvm::DriverGpuVm for VmInner {
 
             if offset > 0 {
                 let skip = len.min(offset);
-                addr += skip;
+                let Some(next) = addr.checked_add(skip) else {
+                    self.rollback_failed_map(map_addr, map_length as u64);
+                    return Err(EFAULT);
+                };
+                addr = next;
                 len -= skip;
                 offset -= skip;
             }
@@ -657,6 +661,13 @@ impl gpuvm::DriverGpuVm for VmInner {
                 len = left;
             } else {
                 len = len.min(left);
+            }
+            // map_pages advances the physical address across ordinary
+            // segments; a repeated mapping still needs one complete page.
+            let physical_len = if one_page { UAT_PGSZ } else { len };
+            if addr.checked_add(physical_len).is_none() {
+                self.rollback_failed_map(map_addr, map_length as u64);
+                return Err(EFAULT);
             }
 
             mod_dev_dbg!(
