@@ -397,7 +397,7 @@ impl FenceContexts {
 
     /// Create a new fence in a given context index.
     pub fn new_fence<T: FenceOps>(&self, context: u32, inner: T) -> Result<UniqueFence<T>> {
-        if context > self.count {
+        if context >= self.count {
             return Err(EINVAL);
         }
 
@@ -437,6 +437,45 @@ impl FenceContexts {
         };
 
         Ok(UniqueFence(p))
+    }
+}
+
+#[cfg(CONFIG_RUST_DMA_FENCE_KUNIT_TEST)]
+#[kunit_tests(rust_dma_fence)]
+mod tests {
+    use super::*;
+    use crate::{c_str, str::CStr};
+
+    static KEY: Pin<&LockClassKey> = crate::static_lock_class!();
+
+    struct TestFence;
+
+    #[vtable]
+    impl FenceOps for TestFence {
+        fn get_driver_name<'a>(self: &'a FenceObject<Self>) -> &'a CStr {
+            c_str!("rust-kunit")
+        }
+
+        fn get_timeline_name<'a>(self: &'a FenceObject<Self>) -> &'a CStr {
+            c_str!("contexts")
+        }
+    }
+
+    #[test]
+    fn context_bounds() -> Result {
+        let one = FenceContexts::new(1, c_str!("rust-fence-one"), KEY)?;
+        let _valid = one.new_fence(0, TestFence)?;
+        assert!(matches!(one.new_fence(1, TestFence), Err(EINVAL)));
+        assert!(matches!(one.new_fence(u32::MAX, TestFence), Err(EINVAL)));
+
+        let empty = FenceContexts::new(0, c_str!("rust-fence-empty"), KEY)?;
+        assert!(matches!(empty.new_fence(0, TestFence), Err(EINVAL)));
+
+        let two = FenceContexts::new(2, c_str!("rust-fence-two"), KEY)?;
+        let _first = two.new_fence(0, TestFence)?;
+        let _last = two.new_fence(1, TestFence)?;
+        assert!(matches!(two.new_fence(2, TestFence), Err(EINVAL)));
+        Ok(())
     }
 }
 

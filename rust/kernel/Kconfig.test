@@ -13,6 +13,15 @@ menuconfig RUST_KUNIT_TESTS
 	  If unsure, say N.
 
 if RUST_KUNIT_TESTS
+config RUST_DMA_FENCE_KUNIT_TEST
+	bool "KUnit tests for Rust DMA-fence contexts" if !KUNIT_ALL_TESTS
+	depends on DMA_SHARED_BUFFER
+	default KUNIT_ALL_TESTS
+	help
+	  Test bounds handling for Rust DMA-fence contexts.
+
+	  If unsure, say N.
+
 config RUST_ALLOCATOR_KUNIT_TEST
 	bool "KUnit tests for Rust allocator API" if !KUNIT_ALL_TESTS
 	default KUNIT_ALL_TESTS
