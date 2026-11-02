@@ -326,6 +326,7 @@ pub(crate) fn devctl_submit(
     let start = Instant::<Monotonic>::now();
     let expired = || start.elapsed() > Delta::from_millis(2000);
     let opcode = record.opcode();
+    session.check()?;
     while channels.devctl.read()? != producer {
         channels.drain_rings(&dev, events)?;
         session.check()?;
@@ -343,6 +344,10 @@ pub(crate) fn devctl_submit(
             return Err(ETIMEDOUT);
         }
         fsleep(Delta::from_micros(1000));
+    }
+    session.check()?;
+    if init.halted()? {
+        return Err(EBUSY);
     }
     channels
         .devctl

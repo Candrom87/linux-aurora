@@ -418,6 +418,7 @@ impl Session {
 
     /// Sends a mailbox message.
     pub(crate) fn send(&mut self, endpoint: u8, message: u64) -> Result {
+        self.check()?;
         self.rtkit.send(endpoint, message)
     }
 
