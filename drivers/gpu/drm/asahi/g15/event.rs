@@ -82,7 +82,7 @@ impl Events {
         // SAFETY: ktime_get() has no preconditions.
         let now = unsafe { bindings::ktime_get() } as u64;
         if producer >= RING_SLOTS || read >= RING_SLOTS {
-            return Ok(());
+            return Err(EIO);
         }
         rmb();
         while read != producer {
