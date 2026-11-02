@@ -375,6 +375,9 @@ impl FenceContexts {
         name: &'static CStr,
         key: Pin<&'static LockClassKey>,
     ) -> Result<FenceContexts> {
+        if count == 0 {
+            return Err(EINVAL);
+        }
         let mut seqnos: KVec<AtomicU64> = KVec::new();
 
         seqnos.reserve(count as usize, GFP_KERNEL)?;
@@ -468,8 +471,7 @@ mod tests {
         assert!(matches!(one.new_fence(1, TestFence), Err(EINVAL)));
         assert!(matches!(one.new_fence(u32::MAX, TestFence), Err(EINVAL)));
 
-        let empty = FenceContexts::new(0, c_str!("rust-fence-empty"), KEY)?;
-        assert!(matches!(empty.new_fence(0, TestFence), Err(EINVAL)));
+        assert!(matches!(FenceContexts::new(0, c_str!("rust-fence-empty"), KEY), Err(EINVAL)));
 
         let two = FenceContexts::new(2, c_str!("rust-fence-two"), KEY)?;
         let _first = two.new_fence(0, TestFence)?;
