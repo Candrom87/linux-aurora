@@ -685,13 +685,31 @@ pub(crate) fn start(
     if regs.asc_control()? & regs::ASC_RUN != 0 {
         return Err(EBUSY);
     }
+    // Reserved System RAM is CPU-accessible through the existing WB mapping; inspecting it
+    // needs no SGX write. Preserve the old ordering for unqualified non-RAM carveouts.
+    let window = if [&adt.ttbs, &adt.tables, &adt.handoff, &adt.shared_l2]
+        .into_iter()
+        .all(|range| glue::ram_within(range.start, range.end - range.start))
+    {
+        let window = uat::Window::new(&adt)?;
+        if !window.ttbat_is_clear()? {
+            return Err(EBUSY);
+        }
+        Some(window)
+    } else {
+        None
+    };
     regs.open()?;
     // Cold only: ASC RUN clear and an all-zero TTBAT before ownership.
     let control = regs.asc_control()?;
     if control & regs::ASC_RUN != 0 {
         return Err(EBUSY);
     }
-    let window = uat::Window::new(&adt)?;
+    let window = match window {
+        Some(window) => window,
+        None => uat::Window::new(&adt)?,
+    };
+    // Recheck even after a preflight: neither observation reserves the hardware or freezes RAM.
     if !window.ttbat_is_clear()? {
         return Err(EBUSY);
     }
