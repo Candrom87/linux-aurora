@@ -109,6 +109,27 @@ fn aux_opps(
     Ok(n)
 }
 
+/// Source-qualified model transport from this boot's device tree. Parsing
+/// validates shape, identity and independent fields; it does not qualify a
+/// firmware ABI, producer provenance or a new board by itself.
+pub(crate) fn native_reference(dev: &device::Device, chip: u32) -> Result<record::Reference> {
+    let node = dev.of_node().ok_or(ENODEV)?;
+    let property: kernel::of::Property<'_> =
+        node.get_property(c_str!("asahi,g15c-native-board-data"))?;
+    let minimum = 4 * (record::NATIVE_HEADER_CELLS + 3 * 2);
+    if !(minimum..=4 * record::NATIVE_MAX_CELLS).contains(&property.len()) ||
+        property.len() % 4 != 0
+    {
+        dev_err!(dev, "GPU native board-data property length refused\n");
+        return Err(EINVAL);
+    }
+    let cells: KVec<u32> = property.try_into()?;
+    record::Reference::from_native_cells(chip, &cells).map_err(|reason| {
+        dev_err!(dev, "GPU native board data refused: {}\n", reason);
+        EINVAL
+    })
+}
+
 /// The hardware record of a device-tree SoC ([`record`]): built from the GPU node's properties
 /// and operating-point tables, the layout's IOMapping table, the ADT regions and sensor rows,
 /// and the SoC's `reference` words, which neither carries.
@@ -118,6 +139,10 @@ pub(crate) fn hardware_record(
     adt: &GpuAdt,
     reference: &record::Reference,
 ) -> Result<KVVec<u8>> {
+    if !reference.matches_chip(cfg.chip_id) {
+        dev_err!(dev, "GPU board-data chip or grouping evidence mismatch\n");
+        return Err(EINVAL);
+    }
     let layout = cfg.layout;
     let node = dev.of_node().ok_or(ENODEV)?;
     let mut props = [0u32; record::PROPS.len()];
