@@ -104,6 +104,7 @@ static void v14_bl_rpc_cleanup(void *data)
 		if (!IS_ERR_OR_NULL(c->actors[i].task))
 			kthread_stop_put(c->actors[i].task);
 	dcp_v14_stop_backlight(c->f.v14);
+	dcp_release_all_retained_framebuffers(c->f.dcp);
 	if (c->f.v14->active_fb) {
 		drm_framebuffer_put(c->f.v14->active_fb);
 		c->f.v14->active_fb = NULL;
@@ -402,6 +403,95 @@ static void v14_bl_fbdev_unknown_level(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, bd->ops->controls_device(bd, &unrelated));
 }
 
+/* The atomic commit tail parks displaced scanout on this same production list. */
+static void v14_bl_retain_for_test(struct kunit *test, struct v14_bl_rpc *c,
+				 unsigned int index)
+{
+	struct dcp_fb_reference *entry = kzalloc_obj(*entry);
+
+	KUNIT_ASSERT_NOT_NULL(test, entry);
+	entry->fb = &c->fb[index];
+	drm_framebuffer_get(entry->fb);
+	list_add_tail(&entry->head, &c->f.dcp->swapped_out_fbs);
+}
+
+static void v14_bl_blank_retained(struct kunit *test, bool refuse)
+{
+	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
+
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	v14_bl_retain_for_test(test, c, 0);
+	v14_bl_retain_for_test(test, c, 1);
+	c->refuse = refuse;
+	dcp_v14_blank(c->f.v14, c->f.dcp);
+	KUNIT_EXPECT_EQ(test, list_empty(&c->f.dcp->swapped_out_fbs), !refuse);
+	KUNIT_EXPECT_EQ(test, drm_framebuffer_read_refcount(&c->fb[0]), refuse ? 3U : 1U);
+	KUNIT_EXPECT_EQ(test, drm_framebuffer_read_refcount(&c->fb[1]), refuse ? 2U : 1U);
+	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, refuse ? &c->fb[0] : NULL);
+}
+
+static void v14_bl_blank_releases_displaced(struct kunit *test)
+{
+	v14_bl_blank_retained(test, false);
+}
+
+static void v14_bl_failed_blank_keeps_displaced(struct kunit *test)
+{
+	v14_bl_blank_retained(test, true);
+}
+
+static void v14_bl_flush_retained(struct kunit *test, bool failed, bool refuse)
+{
+	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
+	struct {
+		struct drm_plane plane;
+		struct drm_plane_state plane_state;
+		struct drm_crtc_state crtc_state;
+		struct __drm_planes_state planes;
+		struct __drm_crtcs_state crtcs;
+		struct drm_atomic_commit commit;
+	} *s = kunit_kzalloc(test, sizeof(*s), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, s);
+	s->plane_state.fb = &c->fb[1];
+	s->plane_state.visible = true;
+	s->planes.new_state = &s->plane_state;
+	s->crtcs.new_state = &s->crtc_state;
+	s->commit.planes = &s->planes;
+	s->commit.crtcs = &s->crtcs;
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	v14_bl_retain_for_test(test, c, 0);
+	c->f.dcp->crtc->base.primary = &s->plane;
+	c->f.v14->failed = failed;
+	c->refuse = refuse;
+	iomfb_v14_7_flush(c->f.dcp, &c->f.dcp->crtc->base, &s->commit);
+	KUNIT_EXPECT_EQ(test, list_empty(&c->f.dcp->swapped_out_fbs), !(failed || refuse));
+	KUNIT_EXPECT_EQ(test, drm_framebuffer_read_refcount(&c->fb[0]), failed || refuse ? 3U : 1U);
+	KUNIT_EXPECT_EQ(test, drm_framebuffer_read_refcount(&c->fb[1]), failed ? 1U : 2U);
+	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, failed || refuse ? &c->fb[0] : &c->fb[1]);
+	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), failed ? 1 : 2);
+	/* The failed RPC intentionally pins the candidate too. With only a fake
+	 * transport, discard that extra test reference after checking retention;
+	 * production must keep it until reboot, without assuming a hardware stop. */
+	if (refuse)
+		drm_framebuffer_put(&c->fb[1]);
+}
+
+static void v14_bl_flush_releases_displaced_keeps_active(struct kunit *test)
+{
+	v14_bl_flush_retained(test, false, false);
+}
+
+static void v14_bl_failed_flush_keeps_displaced(struct kunit *test)
+{
+	v14_bl_flush_retained(test, true, false);
+}
+
+static void v14_bl_refused_flush_keeps_displaced(struct kunit *test)
+{
+	v14_bl_flush_retained(test, false, true);
+}
+
 static struct kunit_case v14_bl_lifetime_cases[] = {
 	KUNIT_CASE(v14_bl_present_publication_serialized),
 	KUNIT_CASE(v14_bl_running_work_suspend),
@@ -410,6 +500,11 @@ static struct kunit_case v14_bl_lifetime_cases[] = {
 	KUNIT_CASE(v14_bl_registration_unbind_race),
 	KUNIT_CASE(v14_bl_class_unregistered),
 	KUNIT_CASE(v14_bl_fbdev_unknown_level),
+	KUNIT_CASE(v14_bl_blank_releases_displaced),
+	KUNIT_CASE(v14_bl_failed_blank_keeps_displaced),
+	KUNIT_CASE(v14_bl_flush_releases_displaced_keeps_active),
+	KUNIT_CASE(v14_bl_failed_flush_keeps_displaced),
+	KUNIT_CASE(v14_bl_refused_flush_keeps_displaced),
 	{}
 };
 
