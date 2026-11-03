@@ -671,6 +671,12 @@ pub(crate) fn start(
         cfg.name,
         &enabled[..clusters]
     );
+    // ASC is readable before opening SGX (admission already reads it after the power hold).
+    // Refuse a running session before the SGX write. Keep the check below as well: this
+    // observation does not reserve the hardware or prove that it remains cold.
+    if regs.asc_control()? & regs::ASC_RUN != 0 {
+        return Err(EBUSY);
+    }
     regs.open()?;
     // Cold only: ASC RUN clear and an all-zero TTBAT before ownership.
     let control = regs.asc_control()?;
