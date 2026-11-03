@@ -547,17 +547,25 @@ fn run(
     board_images: initdata::BoardImages,
 ) -> Result {
     let dev = session.dev.clone();
+    // RTKit callbacks can latch errors between otherwise successful stages. Stop before
+    // advancing past an observed error; this does not exclude a failure racing a stage.
+    session.check()?;
     session.rtkit.wake()?;
+    session.check()?;
     if !session.rtkit.has_endpoint(hw::ep::FIRMWARE)
         || !session.rtkit.has_endpoint(hw::ep::DOORBELL)
     {
         return Err(ENODEV);
     }
     session.rtkit.start_endpoint(hw::ep::FIRMWARE)?;
+    session.check()?;
     session.rtkit.start_endpoint(hw::ep::DOORBELL)?;
+    session.check()?;
     let uat = session.uat.clone();
     objects.window.bootstrap(&dev, &uat)?;
+    session.check()?;
     let (init, channels, _) = built.insert(initdata::build(&dev, cfg, &session.adt, objects, board_images)?);
+    session.check()?;
     uat::tlbi_all();
     dev_info!(
         dev,
@@ -723,6 +731,8 @@ pub(crate) fn start(
     let mut built = None;
     let result = events
         .reserve()
+        // Callback setup can report a failure before ASC is started.
+        .and_then(|_| session.check())
         .and_then(|_| session.regs.set_asc_control(control | regs::ASC_RUN))
         .and_then(|_| run(&mut session, cfg, &mut objects, &mut events, &mut built, board_images));
     if let Err(e) = result {
