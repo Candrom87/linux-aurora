@@ -213,8 +213,9 @@ pub(crate) struct Inputs<'a> {
 pub(crate) struct Reference {
     /// The maximum GPU power in mW ([`MAX_POWER`]).
     pub(crate) max_power_mw: u32,
-    /// The relative powers of DVFS states 1..7, percent of the top state's (state 8 is 100).
-    pub(crate) relative_power: [u32; RELATIVE_STATES],
+    /// Complete source-order relative powers, including state zero and the top state.
+    /// The selected primary count must match; no top value is fabricated by the builder.
+    pub(crate) relative_power: RelativePowers,
     /// Independent 128-bit MTR masks. The primary fast-die and SoCHot builders can select
     /// different sensors; the alarm mask carries enabled membership. Each requires its own
     /// board provenance. The device tree's `apple,fast-die0-sensor-mask` is another value.
@@ -223,15 +224,54 @@ pub(crate) struct Reference {
     pub(crate) alarm_mask: u128,
 }
 
-/// DVFS states with a relative-power word of their own.
-pub(crate) const RELATIVE_STATES: usize = 7;
+/// The native relative-power region contains one u32 for every selected primary
+/// state (including zero and top), at most 16. Its successor is the independent
+/// relative-boost table at +0x109c. Values are transported unchanged: native u32
+/// normalization can yield a top word other than 100 for unusual inputs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelativePowers {
+    count: usize,
+    words: [u32; STATES],
+}
+
+impl RelativePowers {
+    pub(crate) const fn new<const N: usize>(words: [u32; N]) -> R<Self> {
+        if N == 0 || N > STATES {
+            return Err("relative powers: selected count outside 1..16");
+        }
+        if words[0] != 0 {
+            return Err("relative powers: state zero is not zero");
+        }
+        let mut result = Self { count: N, words: [0; STATES] };
+        let mut index = 0;
+        while index < N {
+            result.words[index] = words[index];
+            index += 1;
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u32] {
+        &self.words[..self.count]
+    }
+
+    fn for_states(&self, selected_count: usize) -> R<&[u32]> {
+        if self.count != selected_count {
+            return Err("relative powers: count differs from selected primary states");
+        }
+        Ok(self.as_slice())
+    }
+}
 
 /// The J516C reference machine's words (its 2419 firmware driver's values on that machine).
 /// Another J516C gets them as a J514S gets the T6030 templates' machine's: the operating
 /// points, voltages, gains and sensor rows are its own, these are the reference machine's.
 pub(crate) const J516C: Reference = Reference {
     max_power_mw: 116739,
-    relative_power: [11, 23, 33, 44, 55, 71, 90],
+    relative_power: match RelativePowers::new([0, 11, 23, 33, 44, 55, 71, 90, 100]) {
+        Ok(words) => words,
+        Err(_) => panic!("invalid J516C relative powers"),
+    },
     fast_die_mask: 0x802a002b_802a002b,
     sochot_mask: 0x802a002b_802a002b,
     alarm_mask: 0x902a102b_802a002b,
@@ -239,12 +279,16 @@ pub(crate) const J516C: Reference = Reference {
 
 /// HardwareDataA's maximum-power word (= `fw::initdata::hwdata::MAX_POWER_A`).
 pub(crate) const MAX_POWER: usize = HWDATA_A + 0x6a4;
-const RELATIVE_POWER: usize = 0x1060;
+const RELATIVE_POWER: usize = 0x105c;
+const RELATIVE_BOOST: usize = 0x109c;
+const _: () = assert!(RELATIVE_POWER + 4 * STATES == RELATIVE_BOOST);
 const FAST_DIE_MASK: usize = HWDATA_A + 0x8ac;
 const SOCHOT_MASK: usize = HWDATA_A + 0x1490;
 const ALARM_MASK: usize = HWDATA_A + 0x24a8;
 
-/// The record words [`Reference`] supplies. Record offsets.
+/// The J516C reference machine's record words. Record offsets; its nine-state
+/// table has seven intermediate entries. Other selected counts are not inferred
+/// from this test inventory and are copied through [`RelativePowers`] in full.
 #[cfg(test)]
 #[rustfmt::skip]
 pub(crate) const REFERENCE_WORDS: [usize; 20] = [
@@ -444,8 +488,16 @@ fn lane(s: &Opp, j: usize) -> u32 {
     }
 }
 
+fn relative_powers(out: &mut [u8], powers: &RelativePowers, selected_count: usize) -> R<()> {
+    for (state, &value) in powers.for_states(selected_count)?.iter().enumerate() {
+        put32(out, RELATIVE_POWER + 4 * state, value)?;
+    }
+    Ok(())
+}
+
 fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
     let p = &i.props;
+    relative_powers(out, &i.reference.relative_power, t.len)?;
     put64(out, 0x0, 0x6f_0000_0000)?;
     put64(out, 0x8, 0xffc0_0000)?;
     put64(out, 0x10, i.usc_base)?;
@@ -528,18 +580,12 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         put32(out, 0x10dc + 4 * k, t.primary[k] as u32)?;
         put32(out, 0x111c + 4 * k, t.secondary[k] as u32)?;
         if k > 0 {
-            // Relative power (the reference machine's) and relative boost frequency.
-            let relative = match i.reference.relative_power.get(k - 1) {
-                Some(&r) if k < t.top() => r,
-                None if k == t.top() => 100,
-                _ => return Err("the reference relative powers are for another state count"),
-            };
-            put32(out, RELATIVE_POWER - 4 + 4 * k, relative)?;
+            // Relative boost frequency; relative powers were copied in full above.
             if ps.mhz > base.mhz {
                 let span = u64::from(top.mhz - base.mhz);
                 put32(
                     out,
-                    0x109c + 4 * k,
+                    RELATIVE_BOOST + 4 * k,
                     (100 * u64::from(ps.mhz - base.mhz) / span) as u32,
                 )?;
             }
@@ -945,7 +991,12 @@ mod tests {
     /// Arbitrary reference words, distinct from the J516C's.
     const TEST_REFERENCE: Reference = Reference {
         max_power_mw: 54321,
-        relative_power: [0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006],
+        relative_power: match RelativePowers::new([
+            0, 0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 100,
+        ]) {
+            Ok(words) => words,
+            Err(_) => panic!("invalid test relative powers"),
+        },
         fast_die_mask: 0x1111_2222_3333_4444,
         sochot_mask: 0x9999_aaaa_bbbb_cccc,
         alarm_mask: 0x5555_6666_7777_8888,
@@ -963,6 +1014,79 @@ mod tests {
     fn rows() -> [[u8; 12]; SENSOR_ROW_COUNT] {
         [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"].map(|k| row(k, 0x10001, 0x1401))
     }
+
+    #[test]
+    fn complete_relative_vectors_keep_every_native_slot_and_top() {
+        macro_rules! check {
+            ($count:expr) => {{
+                let mut words = [0u32; $count];
+                for (state, value) in words.iter_mut().enumerate().skip(1) {
+                    *value = u32::MAX - state as u32;
+                }
+                let powers = RelativePowers::new(words).unwrap();
+                assert_eq!(powers.as_slice(), &words);
+                let mut out = vec![0xa5; RELATIVE_BOOST + 32];
+                relative_powers(&mut out, &powers, $count).unwrap();
+                for (state, &value) in words.iter().enumerate() {
+                    assert_eq!(get(&out, 0x105c + 4 * state), value);
+                }
+                assert!(out[..0x105c].iter().all(|&v| v == 0xa5));
+                assert!(out[0x105c + 4 * $count..].iter().all(|&v| v == 0xa5));
+                let before = out.clone();
+                assert!(relative_powers(&mut out, &powers, $count + 1).is_err());
+                assert_eq!(out, before, "count mismatch must not write a prefix");
+                assert!(relative_powers(&mut out[..0x105c + 4 * $count - 1], &powers, $count).is_err());
+            }};
+        }
+        check!(1); check!(2); check!(3); check!(4);
+        check!(5); check!(6); check!(7); check!(8);
+        check!(9); check!(10); check!(11); check!(12);
+        check!(13); check!(14); check!(15); check!(16);
+        assert!(RelativePowers::new([]).is_err());
+        assert!(RelativePowers::new([0; 17]).is_err());
+        assert!(RelativePowers::new([1, 100]).is_err());
+    }
+
+    #[test]
+    fn full_record_relative_counts_do_not_change_unrelated_bytes() {
+        macro_rules! check {
+            ($count:expr) => {{
+                let mut main = vec![opp(0, [125; 4])];
+                for state in 1..$count {
+                    main.push(opp(100 * state as u32, [500 + 20 * state as u32; 4]));
+                }
+                let cs = [Opp { mhz: 24, mv: [625, 0, 0, 0], cells: 1 }];
+                let mut words = [0u32; $count];
+                for (state, value) in words.iter_mut().enumerate().skip(1) {
+                    *value = 0x1000 + state as u32;
+                }
+                // Explicit synthetic vectors exercise the representation, not a new profile.
+                let reference = Reference {
+                    relative_power: RelativePowers::new(words).unwrap(), ..TEST_REFERENCE
+                };
+                let zero_reference = Reference {
+                    relative_power: RelativePowers::new([0; $count]).unwrap(), ..reference
+                };
+                let mut input = inputs(&main, &cs, &[]);
+                input.reference = &reference;
+                let mut out = vec![0; SIZE];
+                build(&mut out, &input).unwrap();
+                for (state, &value) in words.iter().enumerate() {
+                    assert_eq!(get(&out, 0x105c + 4 * state), value);
+                }
+                assert_eq!(get(&out, 0x109c), 0, "state-zero boost word is independent");
+                input.reference = &zero_reference;
+                let mut zero = vec![0; SIZE];
+                build(&mut zero, &input).unwrap();
+                out[0x105c..0x105c + 4 * $count].fill(0);
+                assert_eq!(out, zero, "relative vector changed unrelated record fields");
+            }};
+        }
+        // Complete records additionally require an active state above the base state.
+        check!(3); check!(4); check!(5); check!(6); check!(7); check!(8); check!(9);
+        check!(10); check!(11); check!(12); check!(13); check!(14); check!(15); check!(16);
+    }
+
 
     fn inputs<'a>(main: &'a [Opp], cs: &'a [Opp], slots: &'a [IoSlot]) -> Inputs<'a> {
         Inputs {
@@ -1156,7 +1280,7 @@ mod tests {
         build(&mut r, &i).unwrap();
         let good = r.clone();
         // The reference words: relative powers of states 1..7, the maximum power, the masks.
-        for k in 0..RELATIVE_STATES {
+        for k in 0..7 {
             assert_eq!(get(&r, 0x1060 + 4 * k), 0x1000 + k as u32);
         }
         assert_eq!(get(&r, FAST_DIE_MASK), 0x3333_4444);
@@ -1271,12 +1395,12 @@ mod tests {
         let mut j = inputs(&main, &cs, &slots);
         j.zones = &[5000, 200, 0x4000_0000];
         assert_eq!(refused(&j), Err(OVERFLOW));
-        // The seven relative powers fit eight states above state 0 and nothing else.
+        // A reference vector must match its selected state count exactly.
         let fewer = &main[..PERF_STATES - 2];
         assert_eq!(tables(fewer).unwrap().top(), 7);
         assert_eq!(
             refused(&inputs(fewer, &cs, &slots)),
-            Err("the reference relative powers are for another state count")
+            Err("relative powers: count differs from selected primary states")
         );
     }
 
