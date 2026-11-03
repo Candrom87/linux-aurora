@@ -207,11 +207,17 @@ pub(crate) struct Inputs<'a> {
     pub(crate) reference: &'a Reference,
 }
 
-/// The record's words that neither the device tree nor the ADT carries, as one machine's
-/// driver wrote them ([`REFERENCE_WORDS`]).
+/// Legacy reference values or explicit boot-loader model data. Chip/grouping
+/// evidence is independent of the numerical model and masks. The legacy
+/// reference-word inventory is [`REFERENCE_WORDS`]; native transport carries
+/// complete variable-length maps and ratios separately.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Reference {
-    /// The maximum GPU power in mW ([`MAX_POWER`]).
+    /// Chip identity of the source-qualified board data.
+    pub(crate) chip_id: u32,
+    pub(crate) grouping: GroupingEvidence,
+    /// Firmware maximum/model word ([`MAX_POWER`]); the legacy field name does not
+    /// establish physical units for a boot-loader-derived native model.
     pub(crate) max_power_mw: u32,
     /// Complete source-order relative powers, including state zero and the top state.
     /// The selected primary count must match; no top value is fabricated by the builder.
@@ -222,6 +228,92 @@ pub(crate) struct Reference {
     pub(crate) fast_die_mask: u128,
     pub(crate) sochot_mask: u128,
     pub(crate) alarm_mask: u128,
+}
+
+/// The existing reference or explicit primary/secondary state-map evidence.
+/// Native arrays are owned so runtime boot metadata needs no static allocation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GroupingEvidence {
+    J516cReference,
+    Native {
+        count: usize,
+        primary: [u8; STATES],
+        secondary: [u8; STATES],
+    },
+}
+
+/// Versioned original boot-loader transport, not a firmware ABI version or a
+/// security attestation. Machine/firmware/source admission remains independent.
+pub(crate) const NATIVE_CONTRACT: u32 = 0x23c2_2001;
+pub(crate) const NATIVE_HEADER_CELLS: usize = 16;
+pub(crate) const NATIVE_MAX_CELLS: usize = NATIVE_HEADER_CELLS + 3 * STATES;
+
+impl Reference {
+    /// Cells: contract, chip, model word, selected count; three independent
+    /// 128-bit masks in most-significant-cell order; primary, secondary and
+    /// complete relative-power arrays (each `count` cells). No defaults.
+    pub(crate) fn from_native_cells(expected_chip: u32, cells: &[u32]) -> R<Self> {
+        const HEADER: usize = NATIVE_HEADER_CELLS;
+        if cells.len() < HEADER || cells[0] != NATIVE_CONTRACT {
+            return Err("native board data: missing header or unsupported contract");
+        }
+        if expected_chip == 0 || cells[1] != expected_chip {
+            return Err("native board data: chip mismatch");
+        }
+        let count = cells[3] as usize;
+        if !(2..=STATES).contains(&count) || cells.len() != HEADER + 3 * count {
+            return Err("native board data: count or packet length");
+        }
+        if cells[2] == 0 {
+            return Err("native board data: zero model reference word");
+        }
+        let mut primary = [0; STATES];
+        let mut secondary = [0; STATES];
+        for k in 0..count {
+            let p = cells[HEADER + k];
+            let s = cells[HEADER + count + k];
+            if p >= PERF_STATES as u32 || s >= PERF_STATES as u32 ||
+                (k == 0 && (p != 0 || s != 0)) || (k != 0 && (p == 0 || s == 0))
+            {
+                return Err("native board data: invalid state-map index");
+            }
+            primary[k] = p as u8;
+            secondary[k] = s as u8;
+        }
+        let mask = |start: usize| cells[start..start + 4].iter()
+            .fold(0u128, |value, &cell| (value << 32) | u128::from(cell));
+        Ok(Self {
+            chip_id: expected_chip,
+            grouping: GroupingEvidence::Native { count, primary, secondary },
+            max_power_mw: cells[2],
+            relative_power: RelativePowers::from_slice(&cells[HEADER + 2 * count..])?,
+            fast_die_mask: mask(4), sochot_mask: mask(8), alarm_mask: mask(12),
+        })
+    }
+
+    pub(crate) fn matches_chip(&self, chip_id: u32) -> bool {
+        self.chip_id == chip_id && match self.grouping {
+            GroupingEvidence::J516cReference => chip_id == 0x6031,
+            GroupingEvidence::Native { count, primary, secondary } => {
+                (2..=STATES).contains(&count) && primary[0] == 0 && secondary[0] == 0 &&
+                    primary[1..count].iter().chain(&secondary[1..count])
+                        .all(|&n| n > 0 && n < PERF_STATES as u8)
+            }
+        }
+    }
+
+    fn approves_grouping(&self, table: &Tables) -> bool {
+        if !self.matches_chip(self.chip_id) {
+            return false;
+        }
+        match self.grouping {
+            GroupingEvidence::J516cReference => true,
+            GroupingEvidence::Native { count, primary, secondary } => {
+                count == table.len && primary[..count] == table.primary[..table.len] &&
+                    secondary[..count] == table.secondary[..table.len]
+            }
+        }
+    }
 }
 
 /// The native relative-power region contains one u32 for every selected primary
@@ -255,6 +347,15 @@ impl RelativePowers {
         &self.words[..self.count]
     }
 
+    pub(crate) fn from_slice(words: &[u32]) -> R<Self> {
+        if words.is_empty() || words.len() > STATES || words[0] != 0 {
+            return Err("relative powers: invalid count or nonzero state zero");
+        }
+        let mut result = Self { count: words.len(), words: [0; STATES] };
+        result.words[..words.len()].copy_from_slice(words);
+        Ok(result)
+    }
+
     fn for_states(&self, selected_count: usize) -> R<&[u32]> {
         if self.count != selected_count {
             return Err("relative powers: count differs from selected primary states");
@@ -267,6 +368,8 @@ impl RelativePowers {
 /// Another J516C gets them as a J514S gets the T6030 templates' machine's: the operating
 /// points, voltages, gains and sensor rows are its own, these are the reference machine's.
 pub(crate) const J516C: Reference = Reference {
+    chip_id: 0x6031,
+    grouping: GroupingEvidence::J516cReference,
     max_power_mw: 116739,
     relative_power: match RelativePowers::new([0, 11, 23, 33, 44, 55, 71, 90, 100]) {
         Ok(words) => words,
@@ -291,7 +394,8 @@ const ALARM_MASK: usize = HWDATA_A + 0x24a8;
 /// from this test inventory and are copied through [`RelativePowers`] in full.
 #[cfg(test)]
 #[rustfmt::skip]
-pub(crate) const REFERENCE_WORDS: [usize; 20] = [
+pub(crate) const REFERENCE_WORDS: [usize; 21] = [
+    0xa28,
     0x1060, 0x1064, 0x1068, 0x106c, 0x1070, 0x1074, 0x1078,
     MAX_POWER,
     FAST_DIE_MASK, FAST_DIE_MASK + 4, FAST_DIE_MASK + 8, FAST_DIE_MASK + 12,
@@ -909,11 +1013,17 @@ pub(crate) fn build(out: &mut [u8], i: &Inputs<'_>) -> R<()> {
     if !matches!(i.chip_id, 0x6031 | 0x6034) {
         return Err("unsupported G15C record SoC");
     }
+    if !i.reference.matches_chip(i.chip_id) {
+        return Err("GPU board-data chip or grouping evidence mismatch");
+    }
     if out.len() != SIZE {
         return Err("record of another size");
     }
     out.fill(0);
     let t = tables(i.main)?;
+    if !i.reference.approves_grouping(&t) {
+        return Err("GPU performance-state grouping lacks matching board evidence");
+    }
     hwdata_b(out, i, &t)?;
     hwdata_a(out, i, &t)?;
     for (k, row) in i.sensor_rows.iter().enumerate() {
@@ -990,6 +1100,8 @@ mod tests {
 
     /// Arbitrary reference words, distinct from the J516C's.
     const TEST_REFERENCE: Reference = Reference {
+        chip_id: 0x6031,
+        grouping: GroupingEvidence::J516cReference,
         max_power_mw: 54321,
         relative_power: match RelativePowers::new([
             0, 0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 100,
@@ -1001,6 +1113,87 @@ mod tests {
         sochot_mask: 0x9999_aaaa_bbbb_cccc,
         alarm_mask: 0x5555_6666_7777_8888,
     };
+
+    fn native_packet() -> Vec<u32> {
+        let mut cells = vec![NATIVE_CONTRACT, 0x6034, 54321, 9];
+        cells.extend_from_slice(&[
+            0x01234567, 0x89abcdef, 0x11112222, 0x33334444,
+            0xfedcba98, 0x76543210, 0x9999aaaa, 0xbbbbcccc,
+            0x80000000, 0x00000001, 0x55556666, 0x77778888,
+        ]);
+        cells.extend_from_slice(&[0, 1, 2, 3, 5, 7, 9, 11, 13]);
+        cells.extend_from_slice(&[0, 1, 2, 3, 4, 6, 8, 10, 12]);
+        cells.extend_from_slice(&[0, 7, 19, 31, 48, 63, 79, 98, 113]);
+        cells
+    }
+
+    #[test]
+    fn native_packet_transports_chip_maps_ratios_and_independent_masks() {
+        let cells = native_packet();
+        let reference = Reference::from_native_cells(0x6034, &cells).unwrap();
+        assert!(reference.matches_chip(0x6034));
+        assert!(!reference.matches_chip(0x6031));
+        assert_eq!(reference.fast_die_mask, 0x01234567_89abcdef_11112222_33334444);
+        assert_eq!(reference.sochot_mask, 0xfedcba98_76543210_9999aaaa_bbbbcccc);
+        assert_eq!(reference.alarm_mask, 0x80000000_00000001_55556666_77778888);
+        let main = main_opps();
+        let cs = [Opp { mhz: 24, mv: [635, 0, 0, 0], cells: 1 }];
+        let mut input = inputs(&main, &cs, &[]);
+        let mut expected = vec![0; SIZE];
+        build(&mut expected, &input).unwrap();
+        expected[0xa28..0xa2c].copy_from_slice(&0x6034u32.to_le_bytes());
+        for (at, value) in [(FAST_DIE_MASK, reference.fast_die_mask),
+                            (SOCHOT_MASK, reference.sochot_mask),
+                            (ALARM_MASK, reference.alarm_mask)] {
+            expected[at..at + 16].copy_from_slice(&value.to_le_bytes());
+        }
+        for (state, &value) in reference.relative_power.as_slice().iter().enumerate() {
+            let at = RELATIVE_POWER + 4 * state;
+            expected[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        input.chip_id = 0x6034;
+        input.reference = &reference;
+        let mut out = vec![0; SIZE];
+        build(&mut out, &input).unwrap();
+        assert_eq!(out, expected);
+        assert_eq!(get(&out, RELATIVE_POWER + 4 * 8), 113);
+    }
+
+    #[test]
+    fn native_packet_refuses_incomplete_mixed_or_relabelled_metadata() {
+        let cells = native_packet();
+        for length in 0..cells.len() {
+            assert!(Reference::from_native_cells(0x6034, &cells[..length]).is_err());
+        }
+        let mut extra = cells.clone(); extra.push(0);
+        assert!(Reference::from_native_cells(0x6034, &extra).is_err());
+        assert!(Reference::from_native_cells(0x6031, &cells).is_err());
+        assert!(Reference::from_native_cells(0, &cells).is_err());
+        for (at, value) in [(0, 0), (2, 0), (3, 0), (3, 1), (3, 17),
+                            (3, u32::MAX), (16, 1), (17, 0), (17, 14),
+                            (25, 1), (26, 0), (26, u32::MAX), (34, 1)] {
+            let mut bad = cells.clone(); bad[at] = value;
+            assert!(Reference::from_native_cells(0x6034, &bad).is_err());
+        }
+        let relabelled = Reference { chip_id: 0x6034, ..J516C };
+        assert!(!relabelled.matches_chip(0x6034));
+    }
+
+    #[test]
+    fn native_packet_checks_both_maps_against_actual_record_grouping() {
+        let main = main_opps();
+        let cs = [Opp { mhz: 24, mv: [635, 0, 0, 0], cells: 1 }];
+        for offset in [16 + 4, 16 + 9 + 4] {
+            let mut cells = native_packet();
+            cells[offset] = if cells[offset] == 4 { 5 } else { 4 };
+            let reference = Reference::from_native_cells(0x6034, &cells).unwrap();
+            let mut input = inputs(&main, &cs, &[]);
+            input.chip_id = 0x6034;
+        input.reference = &reference;
+            assert_eq!(build(&mut vec![0; SIZE], &input),
+                       Err("GPU performance-state grouping lacks matching board evidence"));
+        }
+    }
 
     /// A sensor row: the key's characters in storage order, then two words.
     fn row(key: &[u8; 4], id: u32, kind: u32) -> [u8; 12] {
@@ -1121,6 +1314,8 @@ mod tests {
         }];
         let mut input = inputs(&main, &cs, &slots);
         input.chip_id = 0x6034;
+        let reference = Reference::from_native_cells(0x6034, &native_packet()).unwrap();
+        input.reference = &reference;
         let mut out = vec![0u8; SIZE];
         build(&mut out, &input).unwrap();
         assert_eq!(get(&out, 0xa28), 0x6034);

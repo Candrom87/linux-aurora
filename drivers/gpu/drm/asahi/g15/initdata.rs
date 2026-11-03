@@ -173,14 +173,20 @@ fn device_tree_board(
     let hw_img = board::hardware_record(dev, cfg, adt, reference)?;
     let (glob, pwr, max_power_mw) = board::device_tree(dev, &hw_img)?;
     let max_mhz = adt.perf_mhz.iter().copied().max().unwrap_or(0);
-    dev_info!(
-        dev,
-        "board data: {} images from the device tree and the ADT sensor rows, reference maximum power {} mW and MTR masks, {} MHz top operating point\n",
-        cfg.name,
-        max_power_mw,
-        max_mhz
-    );
-    dev_info!(dev, "board data sha256 {}\n", Hex(&glue::sha256(&hw_img)));
+    if cfg.board == hw::Board::DeviceTreeNative {
+        // Do not log device-derived model words, masks or commitments. The
+        // native model transport does not establish physical mW units.
+        dev_info!(dev, "board data: native model and independent state maps validated\n");
+    } else {
+        dev_info!(
+            dev,
+            "board data: {} images from the device tree and the ADT sensor rows, reference maximum power {} mW and MTR masks, {} MHz top operating point\n",
+            cfg.name,
+            max_power_mw,
+            max_mhz
+        );
+        dev_info!(dev, "board data sha256 {}\n", Hex(&glue::sha256(&hw_img)));
+    }
     let max_khz = max_mhz.checked_mul(1000).ok_or_else(|| {
         dev_err!(dev, "board data: top operating point {} MHz does not fit in kHz\n", max_mhz);
         EINVAL
@@ -202,6 +208,10 @@ pub(crate) fn prepare_board(
     match cfg.board {
         hw::Board::Templates => templates(dev, adt),
         hw::Board::DeviceTree(reference) => device_tree_board(dev, cfg, adt, reference),
+        hw::Board::DeviceTreeNative => {
+            let reference = board::native_reference(dev, cfg.chip_id)?;
+            device_tree_board(dev, cfg, adt, &reference)
+        }
         hw::Board::None => Err(ENODEV),
     }
 }
@@ -263,7 +273,7 @@ pub(crate) fn build(
 
     // Board images, verified, then the owned replacements.
     let (mut hw_img, mut glob, pwr, max_khz) = board_images;
-    if matches!(cfg.board, hw::Board::DeviceTree(_)) {
+    if matches!(cfg.board, hw::Board::DeviceTree(_) | hw::Board::DeviceTreeNative) {
         // This timestamp belongs to initdata creation, not board-data preflight.
         let now: u64;
         // SAFETY: Reading the architectural counter has no side effects.
@@ -288,7 +298,7 @@ pub(crate) fn build(
     // The device tree's standby time (a device-tree SoC; the templates' machine
     // has none).
     let dt_standby = match cfg.board {
-        hw::Board::DeviceTree(_) => {
+        hw::Board::DeviceTree(_) | hw::Board::DeviceTreeNative => {
             let prop = board::words::PROPS[board::words::STANDBY_TIMER];
             match dev
                 .of_node()
