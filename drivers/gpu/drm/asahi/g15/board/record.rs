@@ -1468,6 +1468,7 @@ mod tests {
         nodes: &[(String, Vec<(String, Vec<u8>)>)],
         phandle: u32,
         cells: usize,
+        auxiliary: bool,
     ) -> Vec<Opp> {
         let (table, _) = nodes
             .iter()
@@ -1485,7 +1486,8 @@ mod tests {
                 assert_eq!(uv.len(), 4 * cells);
                 let mut mv = [0u32; CLUSTERS];
                 for (c, m) in mv.iter_mut().enumerate().take(cells) {
-                    *m = be32(uv, 4 * c).div_ceil(1000);
+                    let uv = be32(uv, 4 * c);
+                    *m = if auxiliary { uv / 1000 } else { uv.div_ceil(1000) };
                 }
                 (
                     p.clone(),
@@ -1499,6 +1501,19 @@ mod tests {
             .collect();
         rows.sort_by(|x, y| x.0.cmp(&y.0));
         rows.into_iter().map(|(_, o)| o).collect()
+    }
+
+    #[test]
+    fn fixture_auxiliary_voltage_truncates_separately_from_main() {
+        let nodes = vec![
+            ("/opps".into(), vec![("phandle".into(), 7u32.to_be_bytes().to_vec())]),
+            ("/opps/opp00".into(), vec![
+                ("opp-hz".into(), 48_000_000u64.to_be_bytes().to_vec()),
+                ("opp-microvolt".into(), 625_999u32.to_be_bytes().to_vec()),
+            ]),
+        ];
+        assert_eq!(opp_table(&nodes, 7, 1, true)[0].mv[0], 625);
+        assert_eq!(opp_table(&nodes, 7, 1, false)[0].mv[0], 626);
     }
 
     /// No GPU node property value panics the builder (CONFIG_RUST_OVERFLOW_CHECKS is on in our
@@ -1610,9 +1625,10 @@ mod tests {
             &nodes,
             be32(prop(gpu, "operating-points-v2").unwrap(), 0),
             4,
+            false,
         );
-        let cs = opp_table(&nodes, be32(prop(gpu, "apple,cs-opp").unwrap(), 0), 1);
-        let afr = opp_table(&nodes, be32(prop(gpu, "apple,afr-opp").unwrap(), 0), 1);
+        let cs = opp_table(&nodes, be32(prop(gpu, "apple,cs-opp").unwrap(), 0), 1, true);
+        let afr = opp_table(&nodes, be32(prop(gpu, "apple,afr-opp").unwrap(), 0), 1, true);
         assert_eq!(main.len(), PERF_STATES);
         // The ttbs region: the first memory-region phandle's reserved-memory node.
         let regions = prop(gpu, "memory-region").unwrap();

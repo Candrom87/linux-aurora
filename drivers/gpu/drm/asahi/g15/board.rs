@@ -96,7 +96,8 @@ fn aux_opps(
         })?;
         out[n] = record::Opp {
             mhz,
-            mv: [uv[0].div_ceil(1000), 0, 0, 0],
+            // The 2419 G15C CS/AFR record importer truncates microvolts to millivolts.
+            mv: [uv[0] / 1000, 0, 0, 0],
             cells: 1,
         };
         n += 1;
