@@ -61,6 +61,7 @@ mod graph;
 pub(crate) mod hw;
 mod identity;
 mod initdata;
+mod mmio_plan;
 mod job;
 mod object;
 mod params;

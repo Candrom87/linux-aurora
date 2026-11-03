@@ -70,6 +70,8 @@ pub(crate) struct Layout {
     pub(crate) hwdata_view: usize,
     /// HardwareDataB IOMapping records.
     pub(crate) iomaps: &'static [IoMap],
+    /// Optional physical lists packed into one firmware window; empty for existing profiles.
+    pub(crate) scatter_iomaps: &'static [ScatterIoMap],
     /// For a record built from the device tree ([`super::board::record`]): per IOMapping
     /// record, in `iomaps` order, the mapped bytes, the element bytes and whether the firmware
     /// may write the window; and the unmapped slots whose flag word is nevertheless 1.
@@ -106,6 +108,7 @@ pub(crate) mod t6030 {
         hwdata_cached: Some(super::super::fw::initdata::hwdata::CACHED),
         hwdata_view: super::super::fw::initdata::hwdata::FAULT_INFO,
         iomaps: &super::IOMAPS,
+        scatter_iomaps: &[],
         record_slots: &[],
         record_empty_writable: &[],
     };
@@ -319,6 +322,12 @@ pub(crate) struct IoMap {
     pub(crate) va: u64,
     /// Added to `va` in the HardwareData record.
     pub(crate) delta: u64,
+}
+
+/// Physical ranges packed consecutively into one firmware IOMapping window.
+pub(crate) struct ScatterIoMap {
+    pub(crate) slot: u8,
+    pub(crate) ranges: &'static [super::mmio_plan::PhysRange],
 }
 
 /// HardwareDataB IOMapping records of the qualified build.

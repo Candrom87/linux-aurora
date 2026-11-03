@@ -26,6 +26,7 @@ use super::fw::initdata::{
 };
 use super::hw::{self, va};
 use super::identity::Hex;
+use super::mmio_plan::{self, Mapping};
 use super::object::{Class, FwObject, Objects, Placement, Request};
 use super::Config;
 
@@ -191,6 +192,139 @@ fn device_tree_board(
 /// Verified board bytes, prepared before any GPU firmware is started.
 pub(crate) type BoardImages = (KVVec<u8>, KVVec<u8>, KVVec<u8>, u32);
 
+/// Whether a page-rounded fixed object overlaps the half-open candidate range.
+fn overlaps_object(start: u64, end: u64, object: u64, bytes: usize) -> Result<bool> {
+    if start >= end || bytes == 0 {
+        return Err(EINVAL);
+    }
+    let page_start = object & !(hw::PAGE - 1);
+    let page_end = object.checked_add(bytes as u64)
+        .and_then(|v| v.checked_add(hw::PAGE - 1))
+        .map(|v| v & !(hw::PAGE - 1)).ok_or(EINVAL)?;
+    Ok(start < page_end && page_start < end)
+}
+
+/// Check the fixed host-window objects allocated before the I/O mappings.
+/// Keep this list in step with `build()`, `Channels::alloc()` and `self_check()`.
+fn overlaps_fixed(cfg: &Config, start: u64, end: u64) -> Result<bool> {
+    let layout = cfg.layout;
+    let fixed = [
+        (va::ROOT, root::SIZE), (va::REGION_A, region_a::SIZE),
+        (va::RUNTIME, runtime::SIZE), (layout.hwdata_va, layout.hwdata_size),
+        (va::PAIR, pair::SIZE), (va::SMALL, small::SIZE),
+        (va::C0, cbuf::C0_SIZE), (va::C1, cbuf::C1_SIZE), (va::C3, cbuf::C3_SIZE),
+        (va::GLOBALS, globals::SIZE), (va::POWER, power::SIZE),
+        (va::CONTROL, control::SIZE), (va::FLAGS, flags::SIZE),
+        (va::DEVCTL_STATE, hw::rings::STATE_SIZE),
+        (va::DEVCTL_RING, hw::rings::DEVCTL_RING_SIZE),
+        (va::EVENT_STATE, hw::rings::STATE_SIZE),
+        (va::EVENT_RING, hw::rings::EVENT_RING_SIZE),
+        (va::LOG_STATE, hw::rings::LOG_STATE_SIZE), (va::LOG_RING, hw::rings::LOG_RING_SIZE),
+        (va::TRACE_STATE, hw::rings::STATE_SIZE), (va::TRACE_RING, hw::rings::TRACE_RING_SIZE),
+        (va::STATS_STATE, hw::rings::STATE_SIZE), (va::STATS_RING, hw::rings::STATS_RING_SIZE),
+        (va::FWCTL_STATE, hw::rings::STATE_SIZE), (va::FWCTL_RING, hw::rings::FWCTL_RING_SIZE),
+        (va::SELF_CHECK, hw::PAGE as usize * 5),
+    ];
+    for (at, size) in fixed {
+        if overlaps_object(start, end, at, size)? {
+            return Ok(true);
+        }
+    }
+    for i in 0..hw::rings::CHANNELS {
+        if overlaps_object(start, end, va::ch_state(i), hw::rings::STATE_SIZE)? ||
+            overlaps_object(start, end, va::ch_ring(i), hw::rings::CHANNEL_RING_SIZE)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Reject inconsistent scatter descriptions before any firmware graph is built.
+/// A valid layout is not itself proof that its physical ranges are safe to map.
+pub(crate) fn check_scatter(cfg: &Config) -> Result {
+    let layout = cfg.layout;
+    if layout.scatter_iomaps.is_empty() {
+        return Ok(());
+    }
+    if !matches!(cfg.board, hw::Board::DeviceTree(_)) ||
+        layout.record_slots.len() != layout.iomaps.len() ||
+        layout.iomaps.len() > board::record::IOMAP_SLOTS
+    {
+        return Err(EINVAL);
+    }
+    let host_end = hw::HOST.checked_add(hw::HOST_SIZE).ok_or(EINVAL)?;
+    let timestamps_end = va::TIMESTAMPS.checked_add(va::TIMESTAMPS_SIZE).ok_or(EINVAL)?;
+    let phys_end = 1u64.checked_shl(cfg.uat_oas).ok_or(EINVAL)?;
+    // The G15 walkers and backing checks use PA_MASK even if a future
+    // profile advertises a wider UAT output address size.
+    let representable_end = (hw::PA_MASK | (hw::PAGE - 1)).checked_add(1).ok_or(EINVAL)?;
+    if phys_end > representable_end {
+        return Err(EINVAL);
+    }
+    // Once a profile uses scatter, validate every mapping, including the
+    // contiguous ones, before constructing or publishing the firmware graph.
+    for (i, map) in layout.iomaps.iter().enumerate() {
+        let end = map.va.checked_add(map.map_bytes).ok_or(EINVAL)?;
+        let scatter = layout.scatter_iomaps.iter().any(|s| s.slot == map.slot);
+        let (total, element, _) = layout.record_slots[i];
+        if map.slot as usize >= board::record::IOMAP_SLOTS ||
+            map.map_bytes == 0 || map.va & (hw::PAGE - 1) != 0 ||
+            map.pa & (hw::PAGE - 1) != 0 || map.map_bytes & (hw::PAGE - 1) != 0 ||
+            (!scatter && map.pa.checked_add(map.map_bytes).map_or(true, |end| end > phys_end)) ||
+            map.va < hw::HOST || end > host_end ||
+            (map.va < va::FW_ALLOC.end && va::FW_ALLOC.start < end) ||
+            (map.va < timestamps_end && va::TIMESTAMPS < end) ||
+            overlaps_fixed(cfg, map.va, end)?
+        {
+            return Err(EINVAL);
+        }
+        let record_end = map.delta.checked_add(u64::from(total)).ok_or(EINVAL)?;
+        if total == 0 || element == 0 || element > total || record_end > map.map_bytes ||
+            map.pa.checked_add(record_end).is_none() || map.va.checked_add(record_end).is_none()
+        {
+            return Err(EINVAL);
+        }
+        for other in &layout.iomaps[..i] {
+            let other_end = other.va.checked_add(other.map_bytes).ok_or(EINVAL)?;
+            if map.slot == other.slot || (map.va < other_end && other.va < end) {
+                return Err(EINVAL);
+            }
+        }
+    }
+    for (i, &slot) in layout.record_empty_writable.iter().enumerate() {
+        if slot as usize >= board::record::IOMAP_SLOTS ||
+            layout.iomaps.iter().any(|m| m.slot == slot) ||
+            layout.record_empty_writable[..i].contains(&slot)
+        {
+            return Err(EINVAL);
+        }
+    }
+    for (i, scatter) in layout.scatter_iomaps.iter().enumerate() {
+        if layout.scatter_iomaps[..i].iter().any(|s| s.slot == scatter.slot) {
+            return Err(EINVAL);
+        }
+        let mut matches = layout.iomaps.iter().enumerate().filter(|(_, m)| m.slot == scatter.slot);
+        let (idx, map) = matches.next().ok_or(EINVAL)?;
+        if matches.next().is_some() {
+            return Err(EINVAL);
+        }
+        if scatter.ranges.iter().any(|r| {
+                r.start.checked_add(r.len).map_or(true, |end| end > phys_end)
+            })
+        {
+            return Err(EINVAL);
+        }
+        let (total, element, _) = layout.record_slots[idx];
+        let mut plan = [Mapping::default(); mmio_plan::MAX_RANGES];
+        mmio_plan::validate_mapping(
+            hw::PAGE, map.va, map.pa, map.map_bytes, map.delta, total, element,
+            scatter.ranges, &mut plan,
+        ).map_err(|_| EINVAL)?;
+    }
+    Ok(())
+}
+
 /// Build and check the board images before any GPU firmware is started: the templates against
 /// their digests and layout, or the device-tree record from the GPU node, the ADT and the SoC's
 /// reference words.
@@ -199,6 +333,7 @@ pub(crate) fn prepare_board(
     cfg: &Config,
     adt: &GpuAdt,
 ) -> Result<BoardImages> {
+    check_scatter(cfg)?;
     match cfg.board {
         hw::Board::Templates => templates(dev, adt),
         hw::Board::DeviceTree(reference) => device_tree_board(dev, cfg, adt, reference),
@@ -215,6 +350,8 @@ pub(crate) fn build(
     objects: &mut Objects,
     board_images: BoardImages,
 ) -> Result<(InitData, Channels, u32)> {
+    // Reject optional layout errors before allocating or mapping any graph object.
+    check_scatter(cfg)?;
     let mut init = InitData::new();
     let fw = Class::Fw;
     let layout = cfg.layout;
@@ -258,7 +395,22 @@ pub(crate) fn build(
     let channels = Channels::alloc(objects)?;
     // Firmware Device RW aliases for the IOMapping table.
     for map in layout.iomaps.iter() {
-        objects.map_mmio(map.va, map.pa, map.map_bytes)?;
+        if let Some(scatter) = layout.scatter_iomaps.iter().find(|s| s.slot == map.slot) {
+            // check_scatter() validated the complete list before the graph was built.
+            let mut plan = [Mapping::default(); mmio_plan::MAX_RANGES];
+            let (idx, _) = layout.iomaps.iter().enumerate()
+                .find(|(_, m)| m.slot == map.slot).ok_or(EINVAL)?;
+            let (total, element, _) = layout.record_slots[idx];
+            let count = mmio_plan::validate_mapping(
+                hw::PAGE, map.va, map.pa, map.map_bytes, map.delta, total, element,
+                scatter.ranges, &mut plan,
+            ).map_err(|_| EINVAL)?;
+            for part in &plan[..count] {
+                objects.map_mmio(part.va, part.pa, part.len)?;
+            }
+        } else {
+            objects.map_mmio(map.va, map.pa, map.map_bytes)?;
+        }
     }
 
     // Board images, verified, then the owned replacements.

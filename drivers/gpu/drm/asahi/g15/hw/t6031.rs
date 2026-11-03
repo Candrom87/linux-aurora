@@ -112,6 +112,7 @@ pub(crate) const LAYOUT: Layout = Layout {
     hwdata_cached: None,
     hwdata_view: 0xb400,
     iomaps: &IOMAPS,
+    scatter_iomaps: &[],
     record_slots: &RECORD_SLOTS,
     record_empty_writable: &RECORD_EMPTY_WRITABLE,
 };
