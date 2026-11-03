@@ -16,8 +16,8 @@
 //! - the tail's six sensor rows: entries of the ADT's `aon-ptd` sensor table ([`sensor_rows`]);
 //! - a word neither carries ([`REFERENCE_WORDS`]): the value of the J516C reference machine
 //!   ([`Reference`]), as the T6030 templates carry their reference machine's: the maximum
-//!   power (HardwareDataA +0x6a4; every other maximum-power word derives from it), the MTR
-//!   sensor masks and the relative-power table (the device tree's operating-point powers are a
+//!   power (HardwareDataA +0x6a4; every other maximum-power word derives from it), the independent
+//!   MTR sensor masks and the relative-power table (the device tree's operating-point powers are a
 //!   boot-loader stand-in);
 //! - a word the reference machine's record carries and the firmware was shown not to need
 //!   ([`UNNEEDED`]): zero.
@@ -215,10 +215,12 @@ pub(crate) struct Reference {
     pub(crate) max_power_mw: u32,
     /// The relative powers of DVFS states 1..7, percent of the top state's (state 8 is 100).
     pub(crate) relative_power: [u32; RELATIVE_STATES],
-    /// The MTR fast-die sensor mask (written twice) and alarm mask, as the u64 at each place.
-    /// The device tree's `apple,fast-die0-sensor-mask` is another value.
-    pub(crate) fast_die_mask: u64,
-    pub(crate) alarm_mask: u64,
+    /// Independent 128-bit MTR masks. The primary fast-die and SoCHot builders can select
+    /// different sensors; the alarm mask carries enabled membership. Each requires its own
+    /// board provenance. The device tree's `apple,fast-die0-sensor-mask` is another value.
+    pub(crate) fast_die_mask: u128,
+    pub(crate) sochot_mask: u128,
+    pub(crate) alarm_mask: u128,
 }
 
 /// DVFS states with a relative-power word of their own.
@@ -231,6 +233,7 @@ pub(crate) const J516C: Reference = Reference {
     max_power_mw: 116739,
     relative_power: [11, 23, 33, 44, 55, 71, 90],
     fast_die_mask: 0x802a002b_802a002b,
+    sochot_mask: 0x802a002b_802a002b,
     alarm_mask: 0x902a102b_802a002b,
 };
 
@@ -238,18 +241,18 @@ pub(crate) const J516C: Reference = Reference {
 pub(crate) const MAX_POWER: usize = HWDATA_A + 0x6a4;
 const RELATIVE_POWER: usize = 0x1060;
 const FAST_DIE_MASK: usize = HWDATA_A + 0x8ac;
-const FAST_DIE_MASK_2: usize = HWDATA_A + 0x1490;
+const SOCHOT_MASK: usize = HWDATA_A + 0x1490;
 const ALARM_MASK: usize = HWDATA_A + 0x24a8;
 
 /// The record words [`Reference`] supplies. Record offsets.
 #[cfg(test)]
 #[rustfmt::skip]
-pub(crate) const REFERENCE_WORDS: [usize; 14] = [
+pub(crate) const REFERENCE_WORDS: [usize; 20] = [
     0x1060, 0x1064, 0x1068, 0x106c, 0x1070, 0x1074, 0x1078,
     MAX_POWER,
-    FAST_DIE_MASK, FAST_DIE_MASK + 4,
-    FAST_DIE_MASK_2, FAST_DIE_MASK_2 + 4,
-    ALARM_MASK, ALARM_MASK + 4,
+    FAST_DIE_MASK, FAST_DIE_MASK + 4, FAST_DIE_MASK + 8, FAST_DIE_MASK + 12,
+    SOCHOT_MASK, SOCHOT_MASK + 4, SOCHOT_MASK + 8, SOCHOT_MASK + 12,
+    ALARM_MASK, ALARM_MASK + 4, ALARM_MASK + 8, ALARM_MASK + 12,
 ];
 
 /// Words the reference machine's record carries that this one leaves zero: the firmware ran,
@@ -297,6 +300,13 @@ fn put32(b: &mut [u8], at: usize, v: u32) -> R<()> {
 
 fn put64(b: &mut [u8], at: usize, v: u64) -> R<()> {
     b.get_mut(at..at + 8)
+        .ok_or("record too short")?
+        .copy_from_slice(&v.to_le_bytes());
+    Ok(())
+}
+
+fn put128(b: &mut [u8], at: usize, v: u128) -> R<()> {
+    b.get_mut(at..at + 16)
         .ok_or("record too short")?
         .copy_from_slice(&v.to_le_bytes());
     Ok(())
@@ -766,10 +776,10 @@ fn hwdata_a(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
     w(0x1294, 1)?;
     w(0x1aa0, 1)?;
     w(0x3aa4, F_5)?;
-    // The MTR sensor masks: the fast-die mask at both places, then the alarm mask.
-    put64(out, FAST_DIE_MASK, i.reference.fast_die_mask)?;
-    put64(out, FAST_DIE_MASK_2, i.reference.fast_die_mask)?;
-    put64(out, ALARM_MASK, i.reference.alarm_mask)?;
+    // Keep all limbs and each producer's independent mask; serialize without aligned loads.
+    put128(out, FAST_DIE_MASK, i.reference.fast_die_mask)?;
+    put128(out, SOCHOT_MASK, i.reference.sochot_mask)?;
+    put128(out, ALARM_MASK, i.reference.alarm_mask)?;
     Ok(())
 }
 
@@ -937,6 +947,7 @@ mod tests {
         max_power_mw: 54321,
         relative_power: [0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006],
         fast_die_mask: 0x1111_2222_3333_4444,
+        sochot_mask: 0x9999_aaaa_bbbb_cccc,
         alarm_mask: 0x5555_6666_7777_8888,
     };
 
@@ -1082,6 +1093,34 @@ mod tests {
     }
 
     #[test]
+    fn independent_full_width_sensor_masks() {
+        let main = main_opps();
+        let cs = [Opp { mhz: 24, mv: [635, 0, 0, 0], cells: 1 }];
+        let reference = Reference {
+            fast_die_mask: 0x0123_4567_89ab_cdef_1111_2222_3333_4444,
+            sochot_mask: 0xfedc_ba98_7654_3210_9999_aaaa_bbbb_cccc,
+            alarm_mask: 0x8000_0000_0000_0001_5555_6666_7777_8888,
+            ..TEST_REFERENCE
+        };
+        let mut input = inputs(&main, &cs, &[]);
+        let mut baseline = vec![0u8; SIZE];
+        build(&mut baseline, &input).unwrap();
+        input.reference = &reference;
+        let mut actual = vec![0u8; SIZE];
+        build(&mut actual, &input).unwrap();
+        for (at, mask) in [(FAST_DIE_MASK, reference.fast_die_mask),
+                           (SOCHOT_MASK, reference.sochot_mask),
+                           (ALARM_MASK, reference.alarm_mask)] {
+            assert_eq!(&actual[at..at + 16], &mask.to_le_bytes());
+            // Both adjacent words and every other byte retain their controller values.
+            assert_eq!(&actual[at - 4..at], &baseline[at - 4..at]);
+            assert_eq!(&actual[at + 16..at + 20], &baseline[at + 16..at + 20]);
+            baseline[at..at + 16].copy_from_slice(&mask.to_le_bytes());
+        }
+        assert_eq!(actual, baseline);
+    }
+
+    #[test]
     fn record_words() {
         let main = main_opps();
         let cs: Vec<Opp> = [24u32, 480, 624, 810, 1024, 1140, 1236]
@@ -1122,8 +1161,8 @@ mod tests {
         }
         assert_eq!(get(&r, FAST_DIE_MASK), 0x3333_4444);
         assert_eq!(get(&r, FAST_DIE_MASK + 4), 0x1111_2222);
-        assert_eq!(get(&r, FAST_DIE_MASK_2), 0x3333_4444);
-        assert_eq!(get(&r, FAST_DIE_MASK_2 + 4), 0x1111_2222);
+        assert_eq!(get(&r, SOCHOT_MASK), 0xbbbb_cccc);
+        assert_eq!(get(&r, SOCHOT_MASK + 4), 0x9999_aaaa);
         assert_eq!(get(&r, ALARM_MASK), 0x7777_8888);
         assert_eq!(get(&r, ALARM_MASK + 4), 0x5555_6666);
         // The sensor rows as given.
