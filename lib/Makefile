@@ -259,6 +259,9 @@ obj-$(CONFIG_REF_TRACKER) += ref_tracker.o
 
 libfdt_files = fdt.o fdt_ro.o fdt_wip.o fdt_rw.o fdt_sw.o fdt_strerror.o \
 	       fdt_empty_tree.o fdt_addresses.o
+
+lib-$(CONFIG_APPLE_T6034_GPU_EARLY_MEMORY) += fdt_check.o
+CFLAGS_fdt_check.o = -I $(srctree)/scripts/dtc/libfdt
 $(foreach file, $(libfdt_files), \
 	$(eval CFLAGS_$(file) = -I $(srctree)/scripts/dtc/libfdt))
 lib-$(CONFIG_LIBFDT) += $(libfdt_files)

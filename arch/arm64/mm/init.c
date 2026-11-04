@@ -48,6 +48,7 @@
 #include <asm/tlb.h>
 #include <asm/alternative.h>
 #include <asm/xen/swiotlb-xen.h>
+#include "asahi-gpu-memory.h"
 
 /*
  * We need to be able to catch inadvertent references to memstart_addr
@@ -295,6 +296,7 @@ void __init arm64_memblock_init(void)
 	}
 
 	early_init_fdt_scan_reserved_mem();
+	asahi_gpu_early_memory(memory_limit == PHYS_ADDR_MAX, linear_region_size);
 }
 
 void __init bootmem_init(void)

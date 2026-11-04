@@ -10,6 +10,7 @@ obj-$(CONFIG_PTDUMP_DEBUGFS)	+= ptdump_debugfs.o
 obj-$(CONFIG_TRANS_TABLE)	+= trans_pgd.o
 obj-$(CONFIG_TRANS_TABLE)	+= trans_pgd-asm.o
 obj-$(CONFIG_DEBUG_VIRTUAL)	+= physaddr.o
+obj-$(CONFIG_APPLE_T6034_GPU_EARLY_MEMORY) += asahi-gpu-memory.o asahi-gpu-memory-data.o
 obj-$(CONFIG_ARM64_MTE)		+= mteswap.o
 obj-$(CONFIG_ARM64_GCS)		+= gcs.o
 obj-$(CONFIG_ARM64_USER4K_KUNIT_TEST) += user4k-test.o user4k-tlb-test.o

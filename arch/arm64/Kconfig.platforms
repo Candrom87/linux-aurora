@@ -42,6 +42,18 @@ config ARCH_APPLE
 	  This enables support for Apple's in-house ARM SoC family, such
 	  as the Apple M1.
 
+config APPLE_T6034_GPU_EARLY_MEMORY
+	bool "Experimental J514M/T6034 GPU early memory preparation"
+	depends on ARCH_APPLE && EFI && OF
+	default n
+	help
+	  Permit an explicitly selected kernel to prepare excluded GPU memory
+	  from this boot's retained ADT before building its linear mappings.
+	  Also requires asahi_t6034_gpu_memory=1 on the kernel command line.
+	  Previously described EFI memory and memory/owner conflicts refuse.
+	  This does not power the GPU, start firmware or enable its OF node.
+	  It needs a reviewed one-shot boot/recovery procedure before use.
+
 config ARCH_ARTPEC
 	bool "Axis Communications ARTPEC SoC Family"
 	depends on ARCH_EXYNOS
