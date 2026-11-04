@@ -86,10 +86,15 @@ pub(crate) fn adopt(
         ttbs: adt.ttbs.clone(),
         kernel_root: adt.tables.start,
     };
-    Ok(Arc::new(
-        mmu::Uat::new_adopted(dev, geometry, &regions)?,
-        GFP_KERNEL,
-    )?)
+    let uat = match cfg.handoff_memory {
+        hw::HandoffMemory::Region => mmu::Uat::new_adopted(dev, geometry, &regions)?,
+        // The experimental no-map contract also opts into bounded shared PPL. Neither
+        // current G15 board selects it; do not infer this policy from chip generation.
+        hw::HandoffMemory::NoMapNormalNc => {
+            mmu::Uat::new_adopted_bounded(dev, geometry, &regions)?
+        }
+    };
+    Ok(Arc::new(uat, GFP_KERNEL)?)
 }
 
 /// Runs `f` on the entries of the RAM table page at `pa`.
@@ -327,10 +332,17 @@ impl Window {
         // it.
         let lower = uat.kernel_lower_root();
         clean_lower(uat)?;
-        self.ppl_lock()?;
-        let result = self.epoch(lower);
-        self.ppl_unlock()?;
-        result?;
+        if uat.bounded_handoff() {
+            // Resolve roots and clean lower tables before taking UatShared. The epoch only
+            // edits the window's mappings; it must not recursively acquire this host mutex.
+            let _transaction = uat.lock_adopted_handoff()?;
+            self.epoch(lower)?;
+        } else {
+            self.ppl_lock()?;
+            let result = self.epoch(lower);
+            self.ppl_unlock()?;
+            result?;
+        }
         self.image.fill(0);
         let r = self.root.io();
         dev_info!(
@@ -383,6 +395,7 @@ impl Window {
     }
 
     fn sync_inner(&mut self, uat: &mmu::Uat, range: Option<Range<u64>>) -> Result {
+        uat.check_handoff()?;
         let Some(l2) = Self::shadow_l2(uat)? else {
             return Ok(());
         };
@@ -392,6 +405,13 @@ impl Window {
                 *out = e.load(Ordering::Acquire);
             }
         })?;
+        // Resolve/snapshot the shadow root before UatShared: kernel_window_root takes a
+        // VM binding lock. Shared-L2 publication uses the same lease as upper leaf edits.
+        let _transaction = if uat.bounded_handoff() {
+            Some(uat.lock_adopted_handoff()?)
+        } else {
+            None
+        };
         let shared = self.shared_l2.io();
         for i in 0..ENTRIES {
             let e = self.snapshot[i];

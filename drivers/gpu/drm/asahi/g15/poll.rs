@@ -112,7 +112,7 @@ impl Shared {
             if firmware.engine.shared.is_none() {
                 firmware.engine.shared = Some(self.clone());
             }
-            let accepted = firmware.enqueue(job);
+            let accepted = firmware.check_uat(&mut done).and_then(|()| firmware.enqueue(job));
             if accepted.is_ok() {
                 if let Err(error) = firmware.publish(&mut done) {
                     self.fail_stop(error);
@@ -204,6 +204,7 @@ impl Firmware {
         if self.recovery.failed().is_some() {
             return Ok(false);
         }
+        self.check_uat(done)?;
         // With nothing published only an armed hang request whose prefix ended or a firmware
         // error event needs this pass: one that arrived after its prefix's receipts is answered
         // here (the firmware halted and waits for the resume) instead of being taken for a

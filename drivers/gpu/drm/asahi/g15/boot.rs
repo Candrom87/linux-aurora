@@ -421,7 +421,8 @@ impl Session {
 
     /// The latched error, if any.
     pub(crate) fn check(&self) -> Result {
-        self.shared.check()
+        self.shared.check()?;
+        self.uat.check_handoff()
     }
 
     /// Sends a mailbox message.
@@ -431,6 +432,7 @@ impl Session {
 
     /// Rings a submit channel's doorbell: EP 0x21 `0x0083 << 48 | channel`.
     pub(crate) fn ring(&mut self, channel: Channel) -> Result {
+        self.check()?;
         self.send(hw::ep::DOORBELL, hw::engine::DOORBELL | channel as u64)
     }
 }

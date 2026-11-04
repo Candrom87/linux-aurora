@@ -170,6 +170,7 @@ mod boot {
     pub struct Session { _owner: Owner, uat: Arc<mmu::Uat>, regs: regs::Regs }
     impl Session {
         pub fn new() -> Self { Self { _owner: Owner, uat: Arc::new(mmu::Uat), regs: regs::Regs } }
+        pub fn check(&self) -> Result { step(14) }
         // UAT
     }
     // BOOTED
@@ -226,7 +227,7 @@ fn main() {
             std::mem::forget(shared);
         }
     }
-    for site in [8, 9, 11, 12] {
+    for site in [8, 9, 11, 12, 14] {
         for orphan_oom in [false, true] {
             reset((1 << site) | if orphan_oom { 1 << 7 } else { 0 });
             let shared = Shared::new(); let result = boot::start(&shared);
@@ -262,7 +263,7 @@ fn main() {
     retained("normal success");
     std::mem::forget((shared, firmware));
     }
-    println!("PASS 26 retention cases: orphan OOM, six backend failure sites, four boot-completion sites, PMP readiness failure and both platform success paths");
+    println!("PASS 28 retention cases: orphan OOM, six backend failure sites, five boot-completion sites, PMP readiness failure and both platform success paths");
     println!("normal success owner_drops={} buffer_drops={}", OWNER_DROPS.get(), BUFFER_DROPS.get());
 }
 '''
@@ -309,7 +310,7 @@ def main():
         name: hashlib.sha256(text.encode()).hexdigest()
         for name, text in [("mod.rs", mod), ("boot.rs", boot), ("kbox.rs", kbox)]},
         "rustc": subprocess.check_output([os.environ.get("HOSTRUSTC", "rustc"), "--version"], text=True).strip(),
-        "cases": 26, "public_old_source_control": CONTROL_REF, "variants": {}}
+        "cases": 28, "public_old_source_control": CONTROL_REF, "variants": {}}
     for name, text in variants.items():
         if name != "actual" and text == source:
             raise RuntimeError("NOT_APPLIED " + name)
@@ -339,7 +340,7 @@ def main():
     after = subprocess.run([str(out / "actual")], capture_output=True, text=True, check=True)
     receipt["actual_after_mutants"] = {"exit": after.returncode, "stdout": after.stdout, "stderr": after.stderr}
     receipt["fixed_invariants"] = {"live_session_owner_drops": 0, "firmware_buffer_drops": 0,
-                                   "checked_cases": 26}
+                                   "checked_cases": 28}
     (out / "result.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
 

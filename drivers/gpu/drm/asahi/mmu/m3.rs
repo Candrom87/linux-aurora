@@ -58,6 +58,11 @@ impl Vm {
         // SAFETY: As in `map_io`, the exec lock is only used for this mapping.
         let mut vm_exec = unsafe { self.gpuvm.exec_lock(None, false)? };
         let inner = vm_exec.unique_gpuvm.data();
+        // This legacy DMA/MMIO helper has no bounded shared-table transaction or backing
+        // owner on rollback. Bounded adopted callers must use the regular map_io path.
+        if inner.uat_inner.bounded_handoff {
+            return Err(EINVAL);
+        }
         let payload = KernelMappingInner {
             owner: self.gpuvm.clone(),
             uat_inner: inner.uat_inner.clone(),
@@ -87,7 +92,7 @@ impl Vm {
             .page_table
             .map_pages(iova..end, phys as PhysicalAddr, prot, false);
         if ret.is_err() {
-            inner.rollback_failed_map(iova, size as u64);
+            inner.rollback_failed_map(iova, size as u64, None);
         }
         // Drop the exec lock before the node, as in `map_io`.
         drop(mutation);

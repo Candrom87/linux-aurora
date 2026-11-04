@@ -48,7 +48,8 @@ pub(crate) enum HandoffMemory {
     /// Preserve the existing per-region WB/reserved-RAM or WC/carveout policy.
     Region,
     /// Exact J514M/T6034 boot-owned no-map DRAM, with no standard linear WB
-    /// alias. Both adopted-UAT mappings must classify it as Normal-NC.
+    /// alias. Both adopted-UAT mappings must classify it as Normal-NC. Shared PPL
+    /// transactions use the bounded, full-system-barrier host-mutex guard.
     /// No current configuration selects this experimental contract.
     #[allow(dead_code)]
     NoMapNormalNc,

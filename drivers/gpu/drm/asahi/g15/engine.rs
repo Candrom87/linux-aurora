@@ -506,6 +506,16 @@ pub(crate) fn complete(done: &mut Completions, job: &Arc<Job>, result: Result) {
 }
 
 impl Firmware {
+    /// Bridge shared-UAT failure into the existing backend retention and completion path.
+    pub(crate) fn check_uat(&mut self, done: &mut Completions) -> Result {
+        if let Err(error) = self.session.uat().check_handoff() {
+            self.fail_stop(error, done);
+            self.session.shared.fail_stop(error);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Accepts a job from the scheduler; it is published by [`Self::publish`]. Records how many
     /// jobs the queue owns at this arrival for the compute horizon.
     pub(crate) fn enqueue(&mut self, job: Arc<Job>) -> Result {
@@ -545,6 +555,7 @@ impl Firmware {
     /// Returns Err only when this call latched the engine failed (a publication error after a
     /// queue WRITE advanced, or a partly sent job): the caller latches the fail-stop.
     pub(crate) fn publish(&mut self, done: &mut Completions) -> Result {
+        self.check_uat(done)?;
         let max_inflight = tuning::MAX_INFLIGHT.clamp(1, sizes::FLIGHTS as u32) as usize;
         let mut result = Ok(());
 
@@ -556,6 +567,7 @@ impl Firmware {
             && self.recovery.armed.is_none()
             && !self.engine.pending.is_empty()
         {
+            self.check_uat(done)?;
             let Some(index) = self.engine.pick() else {
                 break;
             };

@@ -569,6 +569,7 @@ impl gpuvm::DriverGpuVm for VmInner {
         op: OpMap<'op, Self>,
         ctx: &mut Self::SmContext<'ctx>,
     ) -> Result<OpMapped<'op, Self>, Error> {
+        self.uat_inner.check_handoff()?;
         let bind_sequence = self.bind_sequence.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -630,7 +631,7 @@ impl gpuvm::DriverGpuVm for VmInner {
                 ctx.prot,
                 one_page,
             ) {
-                self.rollback_failed_map(map_addr, map_length as u64);
+                self.rollback_failed_map(map_addr, map_length as u64, Some(op.vm_bo()));
                 return Err(error);
             }
 
@@ -642,7 +643,7 @@ impl gpuvm::DriverGpuVm for VmInner {
         let gpuva = match ctx.preallocated_gpuva() {
             Ok(gpuva) => gpuva,
             Err(error) => {
-                self.rollback_failed_map(map_addr, map_length as u64);
+                self.rollback_failed_map(map_addr, map_length as u64, Some(op.vm_bo()));
                 return Err(error);
             }
         };
@@ -682,6 +683,7 @@ impl gpuvm::DriverGpuVm for VmInner {
         op: OpRemap<'op, Self>,
         ctx: &mut Self::SmContext<'ctx>,
     ) -> Result<OpRemapped<'op, Self>, Error> {
+        self.uat_inner.check_handoff()?;
         let orig_prot = op.va_to_unmap().data().prot.ok_or(EINVAL)?;
         let orig_bind_sequence = op.va_to_unmap().data().bind_sequence;
         let orig_invalidated = op.va_to_unmap().flags().contains(GpuVaFlag::INVALIDATED);
@@ -723,11 +725,16 @@ impl gpuvm::DriverGpuVm for VmInner {
         };
 
         let _mutation = self.mapping_mutation();
-        if orig_invalidated {
-            self.page_table
-                .discard_partial_map(unmap_start..unmap_end)?;
+        let result = if orig_invalidated {
+            self.page_table.discard_partial_map(unmap_start..unmap_end)
         } else {
-            self.page_table.unmap_pages(unmap_start..unmap_end)?;
+            self.page_table.unmap_pages(unmap_start..unmap_end)
+        };
+        if let Err(error) = result {
+            if self.uat_inner.bounded_handoff {
+                self.uat_inner.failed.store(true, Ordering::Release);
+            }
+            return Err(error);
         }
 
         if let Some(asid) = self.slot() {
@@ -768,6 +775,9 @@ impl gpuvm::DriverGpuVm for VmInner {
 impl VmInner {
     /// Remove hardware leaves for one complete user GPUVA without allocating.
     fn unmap_gpuva(&mut self, va: &gpuvm::GpuVa<Self>) -> Result {
+        // Error leaves the GPUVA linked. Its GPUVM, VmBo, GEM and SG lease stay owned;
+        // retaining page tables alone would not preserve the mapped backing.
+        self.uat_inner.check_handoff()?;
         mod_dev_dbg!(
             self.dev,
             "MMU: unmap: {:#x}:{:#x}\n",
@@ -776,12 +786,16 @@ impl VmInner {
         );
 
         let _mutation = self.mapping_mutation();
-        if va.flags().contains(GpuVaFlag::INVALIDATED) {
-            self.page_table
-                .discard_partial_map(va.addr()..(va.addr() + va.length()))?;
+        let result = if va.flags().contains(GpuVaFlag::INVALIDATED) {
+            self.page_table.discard_partial_map(va.addr()..(va.addr() + va.length()))
         } else {
-            self.page_table
-                .unmap_pages(va.addr()..(va.addr() + va.length()))?;
+            self.page_table.unmap_pages(va.addr()..(va.addr() + va.length()))
+        };
+        if let Err(error) = result {
+            if self.uat_inner.bounded_handoff {
+                self.uat_inner.failed.store(true, Ordering::Release);
+            }
+            return Err(error);
         }
 
         if let Some(asid) = self.slot() {
@@ -804,10 +818,19 @@ impl VmInner {
 
     /// A failed map has no GPUVA owner to retain its backing or remove its leaves.
     /// GPUVM has already split or removed overlaps throughout this operation's range.
-    fn rollback_failed_map(&mut self, addr: u64, size: u64) {
+    fn rollback_failed_map(&mut self, addr: u64, size: u64, bo: Option<&gpuvm::GpuVmBo<Self>>) {
         // Include the current segment: map_pages can fail after writing some of its leaves.
         // The checked GPUVM operation supplies an aligned range without overflow.
         let result = self.page_table.discard_partial_map(addr..addr + size);
+        if result.is_err() && self.uat_inner.bounded_handoff {
+            // No GPUVA was inserted yet. Retain the VmBo explicitly: it owns the GPUVM,
+            // GEM and SG lease for every possibly surviving leaf. No allocation here.
+            if let Some(bo) = bo {
+                let retained: ARef<gpuvm::GpuVmBo<Self>> = bo.into();
+                core::mem::forget(retained);
+            }
+            self.uat_inner.failed.store(true, Ordering::Release);
+        }
         self.finish_failed_map(addr, size as usize);
         if let Err(error) = result {
             dev_err!(
@@ -929,7 +952,7 @@ impl VmInner {
         // the reserved shared-L2; only final leaf stores below already linked L3s are live.
         self.page_table.prepare_map(node.start()..end)?;
         let uat_inner = self.uat_inner.clone();
-        let handoff = uat_inner.lock_m4_upper(self.is_kernel)?;
+        let handoff = uat_inner.lock_bounded_upper(self.is_kernel)?;
         let result = self.map_node_prepared(node, prot);
         let discard = if result.is_err() {
             // Rollback still changes live leaves and must remain under the PPL lease.
@@ -937,7 +960,11 @@ impl VmInner {
         } else {
             Ok(())
         };
-        // The M4 handoff guard owns UatShared's mutex. Invalidation follows its release.
+        if discard.is_err() && self.uat_inner.bounded_handoff {
+            // Publish uncertainty before releasing shared exclusion or attempting TLBI.
+            self.uat_inner.failed.store(true, Ordering::Release);
+        }
+        // The bounded handoff guard owns UatShared's mutex. Invalidation follows its release.
         drop(handoff);
         if result.is_err() {
             self.finish_failed_map(node.start(), node.mapped_size);
@@ -945,10 +972,7 @@ impl VmInner {
             self.tlbi_contexts_naming_root(node.start(), node.mapped_size);
         }
         if let Err(error) = discard {
-            if self.uat_inner.m4_adopted {
-                // The caller retains its node and backing when this latch is set.
-                self.uat_inner.failed.store(true, Ordering::Release);
-            }
+            // The caller retains its node and backing when the latch above is set.
             dev_err!(
                 self.dev.as_ref(),
                 "Could not discard failed kernel mapping: {:?}\n",
@@ -1036,6 +1060,8 @@ impl VmInner {
 pub(crate) struct Vm {
     dev: ARef<device::Device>,
     id: u64,
+    /// Failure admission without reacquiring a GPUVM reservation already held by a caller.
+    uat_inner: Arc<UatInner>,
     mapping_epoch: Option<Arc<MappingEpoch>>,
     bind_sequence: Arc<AtomicU64>,
     lifetime: Option<Arc<lifetime::VmLifetime>>,
@@ -1589,13 +1615,13 @@ no_debug!(KernelMapping);
 
 impl Drop for KernelMapping {
     fn drop(&mut self) {
-        // An ASC-cached M4 mapping has no qualified cache-flush teardown. Even an unexpected
-        // failed construction must retain its complete node/backing instead of invoking the
-        // unrelated G13/G14 FwCtl protocol.
-        if self.0.uat_inner.m4_adopted && self.0.prot.is_cached_noncoherent() {
+        // An ASC-cached bounded-adopted mapping has no qualified cache-flush teardown. Even
+        // an unexpected failed construction must retain its complete node/backing instead
+        // of invoking the unrelated G13/G14 FwCtl protocol.
+        if self.0.uat_inner.bounded_handoff && self.0.prot.is_cached_noncoherent() {
             self.0.uat_inner.failed.store(true, Ordering::Release);
             pr_err!(
-                "MMU: retaining cached M4 mapping {:#x}+{:#x} until reboot\n",
+                "MMU: retaining cached bounded-adopted mapping {:#x}+{:#x} until reboot\n",
                 self.iova(),
                 self.size()
             );
@@ -1644,12 +1670,12 @@ impl Drop for KernelMapping {
             self.size()
         );
 
-        let upper_handoff = match self.0.uat_inner.lock_m4_upper(owner.is_kernel) {
+        let upper_handoff = match self.0.uat_inner.lock_bounded_upper(owner.is_kernel) {
             Ok(guard) => guard,
             Err(error) => {
                 dev_err!(
                     owner.dev.as_ref(),
-                    "MMU: retaining M4 mapping after PPL failure: {:?}\n",
+                    "MMU: retaining bounded-adopted mapping after PPL failure: {:?}\n",
                     error
                 );
                 return;
@@ -1657,11 +1683,11 @@ impl Drop for KernelMapping {
         };
         let _mutation = owner.mapping_mutation();
         if owner.page_table.unmap_pages(self.iova_range()).is_err() {
-            if self.0.uat_inner.m4_adopted {
+            if self.0.uat_inner.bounded_handoff {
                 self.0.uat_inner.failed.store(true, Ordering::Release);
                 dev_err!(
                     owner.dev.as_ref(),
-                    "MMU: retaining M4 mapping after partial unmap failure\n"
+                    "MMU: retaining bounded-adopted mapping after partial unmap failure\n"
                 );
                 return;
             }
@@ -1694,7 +1720,8 @@ impl Drop for KernelMapping {
         drop(_mutation);
         drop(owner);
         // SAFETY: Every normal path reaches this exactly once, after all GPUVM locks have
-        // been released. Uncertain M4 paths return earlier, retaining the node and its pins.
+        // been released. Uncertain bounded-adopted paths return earlier, retaining the
+        // node and its pins.
         unsafe { ManuallyDrop::drop(&mut self.0) };
     }
 }
@@ -1782,7 +1809,10 @@ struct UatInner {
     firmware: UatFirmware,
     /// The stopped J713 handoff: bounded full-barrier PPL and upper words zero in users.
     m4_adopted: bool,
-    /// An uncertain mapping/root is retained; future M4 allocation and publication fail.
+    /// Serialize shared upper-table edits and root publication with bounded, full-barrier PPL.
+    /// Independent of M4 application-root and generation rules.
+    bounded_handoff: bool,
+    /// An uncertain mapping/root is retained; future bounded allocation/publication fail.
     failed: AtomicBool,
     /// Clean page tables to the point of coherency for a walker that does not snoop the CPU
     /// caches: [`Uat::new_adopted`], and [`UatQuirks::clean_tables`] otherwise.
@@ -1798,13 +1828,13 @@ struct UatInner {
 }
 
 /// A transport owns the sole host-side PPL mutex before touching AP interest.
-struct M4Transport<'a> {
+struct BoundedTransport<'a> {
     shared: Guard<'a, UatShared, MutexBackend>,
     start: Instant<Monotonic>,
     failed: &'a AtomicBool,
 }
 
-impl ppl::Memory for M4Transport<'_> {
+impl ppl::Memory for BoundedTransport<'_> {
     fn firmware_interested(&self) -> bool {
         self.shared.handoff().lock_fw.load(Ordering::Relaxed) != 0
     }
@@ -1835,18 +1865,18 @@ impl ppl::Memory for M4Transport<'_> {
 }
 
 /// Every AP firmware transaction owns the same mutex, including G16 Window operations.
-/// M4 drops its protocol guard before its transport releases the host mutex. The legacy
+/// Bounded PPL drops its guard before its transport releases the host mutex. The legacy
 /// handoff path keeps the preexisting protocol and lock ordering for other generations.
 #[must_use = "retain the guard until protected table mutations have completed"]
 enum HandoffGuard<'a> {
-    M4(ppl::Guard<M4Transport<'a>>),
+    Bounded(ppl::Guard<BoundedTransport<'a>>),
     Legacy(Guard<'a, UatShared, MutexBackend>),
 }
 
 impl HandoffGuard<'_> {
     fn shared_mut(&mut self) -> &mut UatShared {
         match self {
-            Self::M4(guard) => &mut guard.memory_mut().shared,
+            Self::Bounded(guard) => &mut guard.memory_mut().shared,
             Self::Legacy(shared) => shared,
         }
     }
@@ -1860,13 +1890,16 @@ impl Drop for HandoffGuard<'_> {
     }
 }
 
-/// Opaque host-and-firmware lease for G16 window transactions. No caller may
-/// independently manipulate the AP-interest or turn words.
-#[cfg(CONFIG_DRM_ASAHI_G16)]
+/// Opaque host-and-firmware lease for adopted window transactions. No caller may
+/// independently manipulate the AP-interest or turn words while this guard is held.
+#[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
 #[must_use = "retain the guard throughout the reserved-table window transaction"]
-pub(crate) struct M4HandoffGuard<'a> {
+pub(crate) struct AdoptedHandoffGuard<'a> {
     _transaction: HandoffGuard<'a>,
 }
+
+#[cfg(CONFIG_DRM_ASAHI_G16)]
+pub(crate) type M4HandoffGuard<'a> = AdoptedHandoffGuard<'a>;
 
 impl UatInner {
     /// Take the lock on the shared data and return the guard.
@@ -1874,8 +1907,8 @@ impl UatInner {
         self.shared.lock()
     }
 
-    fn check_m4(&self) -> Result {
-        if self.m4_adopted && self.failed.load(Ordering::Acquire) {
+    fn check_handoff(&self) -> Result {
+        if self.bounded_handoff && self.failed.load(Ordering::Acquire) {
             Err(EIO)
         } else {
             Ok(())
@@ -1883,29 +1916,31 @@ impl UatInner {
     }
 
     /// Serialize AP callers before taking the firmware exclusion. Timeouts withdraw
-    /// AP interest while still holding the mutex and latch M4 failure before releasing it.
+    /// AP interest while still holding the mutex and latch failure before releasing it.
+    /// The firmware poll is bounded; waiting for the host mutex is not timed.
     fn lock_handoff(&self) -> Result<HandoffGuard<'_>> {
-        self.check_m4()?;
+        self.check_handoff()?;
         let shared = self.lock();
-        self.check_m4()?;
-        if !self.m4_adopted {
+        self.check_handoff()?;
+        if !self.bounded_handoff {
             shared.handoff_lock();
             return Ok(HandoffGuard::Legacy(shared));
         }
-        let transport = M4Transport {
+        let transport = BoundedTransport {
             shared,
             start: Instant::<Monotonic>::now(),
             failed: &self.failed,
         };
         match ppl::Guard::acquire(transport) {
-            Ok(guard) => Ok(HandoffGuard::M4(guard)),
+            Ok(guard) => Ok(HandoffGuard::Bounded(guard)),
             Err(()) => Err(ETIMEDOUT),
         }
     }
 
     /// No leaf is changed on a failed acquisition. Uncertain mappings retain their backing.
-    fn lock_m4_upper(&self, upper: bool) -> Result<Option<HandoffGuard<'_>>> {
-        if upper && self.m4_adopted {
+    fn lock_bounded_upper(&self, upper: bool) -> Result<Option<HandoffGuard<'_>>> {
+        self.check_handoff()?;
+        if upper && self.bounded_handoff {
             self.lock_handoff().map(Some)
         } else {
             Ok(None)
@@ -2162,7 +2197,7 @@ impl Vm {
                 bind_sequence: bind_sequence.clone(),
                 epoch: Some(0),
                 mm,
-                uat_inner,
+                uat_inner: uat_inner.clone(),
                 binding: binding.clone(),
                 id,
             },
@@ -2173,6 +2208,7 @@ impl Vm {
             dev: dev.as_ref().as_ref().into(),
             id,
             gpuvm,
+            uat_inner,
             mapping_epoch,
             bind_sequence,
             lifetime: None,
@@ -2492,7 +2528,7 @@ impl Vm {
         // Drop the exec_lock first, so that if map_node failed the
         // KernelMappingInner destructur does not deadlock.
         let retain = ret.is_err()
-            && inner.uat_inner.m4_adopted
+            && inner.uat_inner.bounded_handoff
             && inner.uat_inner.failed.load(Ordering::Acquire);
         core::mem::drop(vm_exec);
         if retain {
@@ -2574,7 +2610,7 @@ impl Vm {
         // Drop the exec_lock first, so that if map_node failed the
         // KernelMappingInner destructur does not deadlock.
         let retain = ret.is_err()
-            && inner.uat_inner.m4_adopted
+            && inner.uat_inner.bounded_handoff
             && inner.uat_inner.failed.load(Ordering::Acquire);
         core::mem::drop(vm_exec);
         if retain {
@@ -2729,7 +2765,7 @@ impl Vm {
         let end = iova.checked_add(size as u64).ok_or(EOVERFLOW)?;
         inner.page_table.prepare_map(iova..end)?;
         let transaction_uat = inner.uat_inner.clone();
-        let handoff = transaction_uat.lock_m4_upper(inner.is_kernel)?;
+        let handoff = transaction_uat.lock_bounded_upper(inner.is_kernel)?;
         let mutation = inner.mapping_mutation();
         let ret = inner
             .page_table
@@ -2739,15 +2775,15 @@ impl Vm {
         } else {
             Ok(())
         };
+        let retain = discard.is_err() && inner.uat_inner.bounded_handoff;
+        if retain {
+            inner.uat_inner.failed.store(true, Ordering::Release);
+        }
         drop(handoff);
         if ret.is_err() {
             inner.finish_failed_map(iova, size);
         } else {
             inner.tlbi_contexts_naming_root(iova, size);
-        }
-        let retain = discard.is_err() && inner.uat_inner.m4_adopted;
-        if retain {
-            inner.uat_inner.failed.store(true, Ordering::Release);
         }
         drop(mutation);
         drop(vm_exec);
@@ -2947,6 +2983,12 @@ impl Vm {
 
 impl Drop for VmInner {
     fn drop(&mut self) {
+        if self.uat_inner.check_handoff().is_err() {
+            // Linked GPUVAs independently retain their VmBo/GEM/SG leases. This also
+            // preserves an unbound shadow/lower tree after bounded firmware failure.
+            self.page_table.retain();
+            return;
+        }
         let mut binding = self.binding.lock();
         assert_eq!(binding.active_users, 0);
 
@@ -2966,7 +3008,7 @@ impl Drop for VmInner {
                 Err(_) => {
                     self.page_table.retain();
                     pr_err!(
-                        "MMU: retaining M4 VM {} page tables after PPL failure\n",
+                        "MMU: retaining bounded-adopted VM {} page tables after PPL failure\n",
                         self.id
                     );
                     return;
@@ -3019,6 +3061,11 @@ pub(crate) struct AdoptedRegions {
 }
 
 impl Uat {
+    /// Latched bounded-handoff failure, also checked before generation-specific publication.
+    pub(crate) fn check_handoff(&self) -> Result {
+        self.inner.check_handoff()
+    }
+
     /// Common AP and firmware exclusion for G16's reserved-table window. Acquire
     /// immutable root addresses before this guard, preserving binding -> UAT lock order.
     #[cfg(CONFIG_DRM_ASAHI_G16)]
@@ -3026,7 +3073,23 @@ impl Uat {
         if !self.inner.m4_adopted {
             return Err(EINVAL);
         }
-        Ok(M4HandoffGuard {
+        self.lock_adopted_handoff()
+    }
+
+    /// Whether adopted callers must use the shared bounded transaction instead of raw PPL.
+    #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+    pub(crate) fn bounded_handoff(&self) -> bool {
+        self.inner.bounded_handoff
+    }
+
+    /// Same host mutex and full-barrier PPL guard as binding and shared-upper leaf edits.
+    /// Do not call another helper that takes UatShared while holding this lease.
+    #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+    pub(crate) fn lock_adopted_handoff(&self) -> Result<AdoptedHandoffGuard<'_>> {
+        if !self.inner.bounded_handoff {
+            return Err(EINVAL);
+        }
+        Ok(AdoptedHandoffGuard {
             _transaction: self.inner.lock_handoff()?,
         })
     }
@@ -3089,6 +3152,18 @@ impl Uat {
         Self::new_adopted_with_user_upper(dev, geometry, regions, true)
     }
 
+    /// Experimental G15 admission pairs a no-map Normal-NC handoff with bounded PPL.
+    /// The caller must first admit the no-map Normal-NC memory/ownership contract;
+    /// this constructor does not validate it. M4 root/generation policy is independent.
+    #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+    pub(crate) fn new_adopted_bounded(
+        dev: &driver::AsahiDrmDevice,
+        geometry: UatGeometry,
+        regions: &AdoptedRegions,
+    ) -> Result<Self> {
+        Self::new_adopted_inner(dev, geometry, regions, true, true)
+    }
+
     /// Creates the same owned-RAM adopted UAT, choosing whether application contexts also
     /// name the firmware upper root. M4 qualifies only context 0 for firmware-upper access;
     /// its application TTBAT upper words stay zero. G15 preserves its existing shared upper.
@@ -3098,6 +3173,17 @@ impl Uat {
         geometry: UatGeometry,
         regions: &AdoptedRegions,
         map_kernel_to_user: bool,
+    ) -> Result<Self> {
+        Self::new_adopted_inner(dev, geometry, regions, map_kernel_to_user, !map_kernel_to_user)
+    }
+
+    #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+    fn new_adopted_inner(
+        dev: &driver::AsahiDrmDevice,
+        geometry: UatGeometry,
+        regions: &AdoptedRegions,
+        map_kernel_to_user: bool,
+        bounded_handoff: bool,
     ) -> Result<Self> {
         let handoff_rgn = Self::map_physical(&regions.handoff, HANDOFF_SIZE)?;
         let ttbs_rgn = Self::map_physical(&regions.ttbs, SLOTS_SIZE)?;
@@ -3110,6 +3196,7 @@ impl Uat {
             try_pin_init!(UatInner {
                 firmware: UatFirmware::Handoff,
                 m4_adopted: !map_kernel_to_user,
+                bounded_handoff,
                 failed: AtomicBool::new(false),
                 // The G15 UAT walker does not snoop the CPU caches.
                 clean_poc: true,
@@ -3294,9 +3381,9 @@ impl Uat {
     }
 
     fn bind_inner(&self, vm: &Vm, wait: bool) -> Result<VmBind> {
-        self.inner.check_m4()?;
+        self.inner.check_handoff()?;
         let mut binding = vm.binding.lock();
-        self.inner.check_m4()?;
+        self.inner.check_handoff()?;
 
         if binding.binding.is_none() {
             assert_eq!(binding.active_users, 0);
@@ -3374,11 +3461,11 @@ impl Uat {
     /// observed root is an error, never a new ownership grant.
     #[cfg(CONFIG_DRM_ASAHI_G16)]
     pub(crate) fn check_adopted_bindings(&self) -> Result {
-        self.inner.check_m4()?;
+        self.inner.check_handoff()?;
         // Binding locks precede the global UAT lock, as in bind().
         let lower = self.kernel_lower_vm.ttb() | TTBR_VALID;
         let inner = self.inner.lock();
-        self.inner.check_m4()?;
+        self.inner.check_handoff()?;
         if self.inner.firmware != UatFirmware::Handoff || inner.map_kernel_to_user {
             return Err(EINVAL);
         }
@@ -3459,7 +3546,7 @@ impl Uat {
 
     /// Creates a new `Vm` linked to this UAT.
     pub(crate) fn new_vm(&self, id: u64, kernel_range: Range<u64>) -> Result<Vm> {
-        self.inner.check_m4()?;
+        self.inner.check_handoff()?;
         let vm = Vm::new(
             self.dev.clone(),
             self.inner.clone(),
@@ -3468,7 +3555,7 @@ impl Uat {
             None,
             id,
         )?;
-        self.inner.check_m4()?;
+        self.inner.check_handoff()?;
         Ok(vm)
     }
 
@@ -3612,6 +3699,7 @@ impl Uat {
             try_pin_init!(UatInner {
                 firmware,
                 m4_adopted: false,
+                bounded_handoff: false,
                 failed: AtomicBool::new(false),
                 clean_poc: quirks.clean_tables,
                 quirks,

@@ -366,12 +366,14 @@ impl Vm {
 
     /// Waits before reservation acquisition, allowing healthy retirement to drain.
     pub(crate) fn wait_for_user_map_admission(&self) -> Result {
+        self.uat_inner.check_handoff()?;
         let Some(lifetime) = self.lifetime.as_ref() else {
             return Ok(());
         };
         let mut state = lifetime.state.lock();
         let mut remaining = msecs_to_jiffies(ADMISSION_WAIT_MS);
         loop {
+            self.uat_inner.check_handoff()?;
             let failed = self.status.as_ref().is_some_and(|status| status.get() != 0);
             if !failed
                 && !state.closed
@@ -405,10 +407,12 @@ impl Vm {
 
     /// Acquires a job reference without imposing a VM-wide limit on healthy work.
     pub(crate) fn retain_job(&self) -> Result<VmJobGuard> {
+        self.uat_inner.check_handoff()?;
         let residency = self.enter_residency()?;
         let lifetime = self.lifetime.as_ref().ok_or(EINVAL)?;
         let mut state = lifetime.state.lock();
         loop {
+            self.uat_inner.check_handoff()?;
             if state.closed {
                 return Err(ENOENT);
             }
@@ -428,6 +432,7 @@ impl Vm {
 
     /// The first job of a submission may wait for a clean VM's quarantine drain.
     pub(crate) fn retain_first_job(&self) -> Result<VmJobGuard> {
+        self.uat_inner.check_handoff()?;
         match self.retain_job() {
             Err(error)
                 if error == EIO && self.status.as_ref().is_some_and(|status| status.get() == 0) => {
@@ -438,6 +443,7 @@ impl Vm {
         let mut remaining = msecs_to_jiffies(ADMISSION_WAIT_MS);
         let mut state = lifetime.state.lock();
         while state.blocked
+            && self.uat_inner.check_handoff().is_ok()
             && remaining != 0
             && self.status.as_ref().is_some_and(|status| status.get() == 0)
         {
@@ -456,6 +462,7 @@ impl Vm {
 
     /// Called only after the GPUVM exec/reservation locks have been acquired.
     pub(super) fn mapping_commit(&self) -> Result<Option<MappingCommit>> {
+        self.uat_inner.check_handoff()?;
         let Some(lifetime) = self.lifetime.as_ref() else {
             return Ok(None);
         };

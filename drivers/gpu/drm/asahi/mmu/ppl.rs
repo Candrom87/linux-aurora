@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! The M4 two-party PPL protocol. The transport owns the host mutex for the entire
+//! Bounded two-party PPL protocol for explicitly selected adopted handoffs. The transport owns the host mutex for the entire
 //! guard lifetime: firmware exclusion alone does not serialize two AP threads.
 //! This core has no kernel dependencies so the production guard can be exercised
 //! against deterministic firmware and concurrent host transports.
