@@ -1,6 +1,7 @@
 {
   "date": "2026-11-04",
-  "scope": "Connected opt-in kernel early-memory source, with synthetic CPU tests and target object checks. No installed boot artifacts or physical GPU operation.",
+  "scope": "Correct live-FDT publication ordering. Source/host/compiled-object and full-kernel CPU-only evidence, not Mac hardware or GPU qualification.",
+  "base_kernel_commit": "a3369351cc8c74fdbd6fe24df09172217bdcfdc7",
   "source_sha256": {
     "scripts/dtc/libfdt/fdt.c": "cc8a838a16e904560042b61e37613c8d51a09d2c83bd43733c50bf97e9dcdaeb",
     "scripts/dtc/libfdt/fdt_addresses.c": "11ac9fb9f20f798483bc1e9e2835b79ef110e55ed7114e20337e59a1b6f4125f",
@@ -12,58 +13,40 @@
     "scripts/dtc/libfdt/fdt_wip.c": "a26966b2d991b432473f5c7f6740a3db97ae51313da0ad9eba56048d56c06c73",
     "scripts/dtc/libfdt/fdt_strerror.c": "4a1de9eb7eadefe07cfe53c238785aa9bdd54e5387903c2faa7e42006027c137",
     "arch/arm64/mm/asahi-gpu-memory-data.c": "3e4666367a89d7d1bb89ee6d8eac27e2b42b89c1781c6db0d378d1a9e63b23c6",
-    "tools/asahi/g15-early-memory/fixture.c": "c4123d7d134f8a2d377197cd1a695d3797ae5b4bca9ba0db9c9d34e045a30066",
-    "arch/arm64/mm/asahi-gpu-memory.c": "aadcca2a723d1cacfeeb2e9b8f93da28a95a72de5922655ef4cbac4103d48026",
-    "arch/arm64/mm/asahi-gpu-memory.h": "4d727f8bc6fa270aeb41e124434718183c128157f44098c05a00c69154500448",
+    "tools/asahi/g15-early-memory/fixture.c": "7a8025bd1a0692a05aebb1806d66d00980cde578ac493cc1360791a41d949ebd",
+    "arch/arm64/mm/asahi-gpu-memory.c": "a0e8422bae22e73c8a2e55055667b3b741fde9958ca5e8038ad2d8a8a638478e",
+    "arch/arm64/mm/asahi-gpu-memory.h": "9137f10d041381cbed2405a8099af94469b433887ad00ed2dd9096ba8c127c3b",
     "arch/arm64/mm/init.c": "9c40aa2f84d432149099bbbe6393fbcd4483fdf1978d4938ef3b0074904e188d",
     "arch/arm64/mm/Makefile": "9c6834ef37bfb8bf51aa39a092b6bb6410e38f1ae6661a36dd1e4e2d9e24c379",
     "arch/arm64/Kconfig.platforms": "374ea820022748845b744c42307124d88da35381a6b6aa370b48e7a4cc70b0c1",
-    "arch/arm64/kernel/setup.c": "3c93ac4724a8ae2d1a57cdc063224d084fe4bcecb5b0851690dbd5467ca458e0",
+    "arch/arm64/kernel/setup.c": "4c58cb8a405f3b9629e5205d74ce03be8ada73243e9515893893583732eabace",
+    "arch/arm64/mm/mmu.c": "7424672df7b0caa70c90fde5f08ebea3416ecced5ee4220c72ea56b1a2d159f1",
+    "arch/arm64/mm/fixmap.c": "95cb27c44338487d96e34b3db62f756710d4930350ab7a291096e2c46e312b43",
+    "arch/arm64/include/asm/pgtable-hwdef.h": "80b7dc0c894c93098fc58e26a5a284fdb129366ffca9cb3fb5e5d48a2e06835a",
+    "arch/arm64/include/asm/pgtable-prot.h": "9b8ae871c4f7818dfda15326bdcc32c321a276d787beac2a9dde5535575ce4a2",
+    "arch/arm64/include/asm/memory.h": "79a7aee3965a76068a5efb9cbad9123d54d68cbd33da71c49583e0695e3f085d",
     "drivers/of/of_reserved_mem.c": "ff7d2b7ead10513937db3f43af3aee91ea10e2f9b345daf93aca98002f5bd6a2",
+    "drivers/of/fdt.c": "40c4cf824782f8ffeb98780d2487a9f86aff6753f2bd3803dbc6026aba7bb5df",
     "lib/Makefile": "eb633be1ad2a9fd64d8ce4333eba4b0f1dec0e8bb82c55a9a7698275ec09f1ea",
     "lib/fdt_check.c": "febf94f5b3d7a0f1df1f36d88aa7f9439f36ec11c1e14c573b8ddc574615f514",
-    "tools/asahi/g15-early-memory/support.h": "24f24a6eb52f383bd09e6f7bd0b7b1e0ffbb0025ac93cde3df85ad06ca32bd3f",
-    "tools/asahi/g15-early-memory/check.py": "77540ac3ccf6d47414581a7e21f3fbc986f9b0a3992384175ebb1a5710a1c1e5",
+    "tools/asahi/g15-early-memory/support.h": "d5353b69c8d68c02f4c9d2d0f1b702fea716810adee69461ef34f9aee89b8069",
+    "tools/asahi/g15-early-memory/check.py": "c8921c13d0424938c4cd6828dd1cf729e73ad538b57f25114fb4ef4ccc8f99b3",
     "scripts/dtc/libfdt/fdt.h": "f1762a7e8de699e4c2dde3f39b2c1bee7380e8a13017036f7096b688efa059d4",
     "scripts/dtc/libfdt/libfdt.h": "f590bcb2d4fd6bfdd95af31f90aa4967a7a5bef9e9953f01ffb3f587c782ba1b",
     "scripts/dtc/libfdt/libfdt_env.h": "687b9e736f5e5b26812dc3e01609ba3a90c902442cd6f9446030a1f093a0f911",
-    "scripts/dtc/libfdt/libfdt_internal.h": "d1ce78803d05f85c7c277b3032596d9f3c0fe151c3bdf32c0701fdb6e3d581bf"
+    "scripts/dtc/libfdt/libfdt_internal.h": "d1ce78803d05f85c7c277b3032596d9f3c0fe151c3bdf32c0701fdb6e3d581bf",
+    "tools/asahi/g15-early-memory/cpu_boot.py": "db06473be440c089f9f2a2ce0f780ab6c0ba85784eee6e5a97bfd11e300ad2e8",
+    "tools/asahi/g15-early-memory/test_cpu_boot.py": "85b92513df62a86f451e92c13665ca84c5d8f677d6a904e6b84c69c326069f7c",
+    "tools/asahi/g15-early-memory/README.md": "f4724d58a7af7ced4933ae2b3bc77ac5b5af78838010d5d03c5f9959eaa7a95e"
   },
   "host_runs": {
-    "gcc12": {
-      "scope": "Compile actual early GPU metadata/runtime source against modeled kernel services.\n\nAll addresses and inputs are synthetic. No physical memory, device, firmware,\ninstalled boot artifacts, root operation, or running kernel is accessed.\n",
-      "compiler": "gcc (GCC) 16.1.1 20260430",
-      "page_shift": 12,
-      "ubsan": false,
-      "actual_of_scan_fragments_sha256": "aada96ab87f1517c2f208be49a7da8afc2d6fba06ebd175555b400d585b07141",
-      "cases": 830,
-      "checks": {
-        "optout": 6,
-        "success": 2,
-        "precommit_refusals": 52,
-        "panic_after_mutation": 12,
-        "parser_atomic": 13,
-        "guarded_prefix_refusals": 740,
-        "bad_fdt_atomic": 5
-      },
-      "warnings": 0,
-      "normal_optout_no_access": true,
-      "reserve_all_before_any_add": true,
-      "original_fdt_never_modified": true,
-      "gpu_disabled_after_preparation": true,
-      "precommit_refusal_no_gpu_reservation_or_memory_mutation": true,
-      "commit_failures_stop_boot_via_panic": true,
-      "built_mutants_rejected": 3,
-      "actual_source_hook_after_reservations_before_paging": true,
-      "limits": "Actual static OF reservation scan bodies run with modeled getters, callbacks and memblock. Kernel services, EFI descriptors, allocators, early mappings and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
-    },
     "gcc14": {
       "scope": "Compile actual early GPU metadata/runtime source against modeled kernel services.\n\nAll addresses and inputs are synthetic. No physical memory, device, firmware,\ninstalled boot artifacts, root operation, or running kernel is accessed.\n",
       "compiler": "gcc (GCC) 16.1.1 20260430",
       "page_shift": 14,
       "ubsan": false,
       "actual_of_scan_fragments_sha256": "aada96ab87f1517c2f208be49a7da8afc2d6fba06ebd175555b400d585b07141",
-      "cases": 830,
+      "cases": 836,
       "checks": {
         "optout": 6,
         "success": 2,
@@ -71,7 +54,8 @@
         "panic_after_mutation": 12,
         "parser_atomic": 13,
         "guarded_prefix_refusals": 740,
-        "bad_fdt_atomic": 5
+        "bad_fdt_atomic": 5,
+        "mapping_and_phase_regressions": 6
       },
       "warnings": 0,
       "normal_optout_no_access": true,
@@ -80,17 +64,20 @@
       "gpu_disabled_after_preparation": true,
       "precommit_refusal_no_gpu_reservation_or_memory_mutation": true,
       "commit_failures_stop_boot_via_panic": true,
-      "built_mutants_rejected": 3,
+      "built_mutants_rejected": 4,
+      "actual_mapping_guard_sha256": "9a76b155d92f5ca02ce75a3c002c8055a961fe031438fff61b61298b96d8a670",
+      "actual_fdt_verify_and_root_scan_sha256": "41e32840d9afa8dba74d380bc6a5b1d6b0cf80fe905ee7b063680944c9edba3b",
       "actual_source_hook_after_reservations_before_paging": true,
-      "limits": "Actual static OF reservation scan bodies run with modeled getters, callbacks and memblock. Kernel services, EFI descriptors, allocators, early mappings and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
+      "actual_source_publication_after_paging_before_unflatten": true,
+      "limits": "Actual static OF reservation scan, FDT verify/root scan and ARM64 mapping-safety function bodies run with modeled services and synthetic 48-bit PA PTE helpers. CRC uses a hosted scalar implementation. Kernel services, EFI descriptors, allocators, paging/linear mapping and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
     },
-    "clang12": {
+    "gcc12": {
       "scope": "Compile actual early GPU metadata/runtime source against modeled kernel services.\n\nAll addresses and inputs are synthetic. No physical memory, device, firmware,\ninstalled boot artifacts, root operation, or running kernel is accessed.\n",
-      "compiler": "clang version 23.1.4",
+      "compiler": "gcc (GCC) 16.1.1 20260430",
       "page_shift": 12,
       "ubsan": false,
       "actual_of_scan_fragments_sha256": "aada96ab87f1517c2f208be49a7da8afc2d6fba06ebd175555b400d585b07141",
-      "cases": 830,
+      "cases": 836,
       "checks": {
         "optout": 6,
         "success": 2,
@@ -98,7 +85,8 @@
         "panic_after_mutation": 12,
         "parser_atomic": 13,
         "guarded_prefix_refusals": 740,
-        "bad_fdt_atomic": 5
+        "bad_fdt_atomic": 5,
+        "mapping_and_phase_regressions": 6
       },
       "warnings": 0,
       "normal_optout_no_access": true,
@@ -107,9 +95,12 @@
       "gpu_disabled_after_preparation": true,
       "precommit_refusal_no_gpu_reservation_or_memory_mutation": true,
       "commit_failures_stop_boot_via_panic": true,
-      "built_mutants_rejected": 3,
+      "built_mutants_rejected": 4,
+      "actual_mapping_guard_sha256": "9a76b155d92f5ca02ce75a3c002c8055a961fe031438fff61b61298b96d8a670",
+      "actual_fdt_verify_and_root_scan_sha256": "41e32840d9afa8dba74d380bc6a5b1d6b0cf80fe905ee7b063680944c9edba3b",
       "actual_source_hook_after_reservations_before_paging": true,
-      "limits": "Actual static OF reservation scan bodies run with modeled getters, callbacks and memblock. Kernel services, EFI descriptors, allocators, early mappings and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
+      "actual_source_publication_after_paging_before_unflatten": true,
+      "limits": "Actual static OF reservation scan, FDT verify/root scan and ARM64 mapping-safety function bodies run with modeled services and synthetic 48-bit PA PTE helpers. CRC uses a hosted scalar implementation. Kernel services, EFI descriptors, allocators, paging/linear mapping and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
     },
     "clang14": {
       "scope": "Compile actual early GPU metadata/runtime source against modeled kernel services.\n\nAll addresses and inputs are synthetic. No physical memory, device, firmware,\ninstalled boot artifacts, root operation, or running kernel is accessed.\n",
@@ -117,7 +108,7 @@
       "page_shift": 14,
       "ubsan": false,
       "actual_of_scan_fragments_sha256": "aada96ab87f1517c2f208be49a7da8afc2d6fba06ebd175555b400d585b07141",
-      "cases": 830,
+      "cases": 836,
       "checks": {
         "optout": 6,
         "success": 2,
@@ -125,7 +116,8 @@
         "panic_after_mutation": 12,
         "parser_atomic": 13,
         "guarded_prefix_refusals": 740,
-        "bad_fdt_atomic": 5
+        "bad_fdt_atomic": 5,
+        "mapping_and_phase_regressions": 6
       },
       "warnings": 0,
       "normal_optout_no_access": true,
@@ -134,17 +126,51 @@
       "gpu_disabled_after_preparation": true,
       "precommit_refusal_no_gpu_reservation_or_memory_mutation": true,
       "commit_failures_stop_boot_via_panic": true,
-      "built_mutants_rejected": 3,
+      "built_mutants_rejected": 4,
+      "actual_mapping_guard_sha256": "9a76b155d92f5ca02ce75a3c002c8055a961fe031438fff61b61298b96d8a670",
+      "actual_fdt_verify_and_root_scan_sha256": "41e32840d9afa8dba74d380bc6a5b1d6b0cf80fe905ee7b063680944c9edba3b",
       "actual_source_hook_after_reservations_before_paging": true,
-      "limits": "Actual static OF reservation scan bodies run with modeled getters, callbacks and memblock. Kernel services, EFI descriptors, allocators, early mappings and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
+      "actual_source_publication_after_paging_before_unflatten": true,
+      "limits": "Actual static OF reservation scan, FDT verify/root scan and ARM64 mapping-safety function bodies run with modeled services and synthetic 48-bit PA PTE helpers. CRC uses a hosted scalar implementation. Kernel services, EFI descriptors, allocators, paging/linear mapping and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
     },
-    "ubsan": {
+    "clang12": {
+      "scope": "Compile actual early GPU metadata/runtime source against modeled kernel services.\n\nAll addresses and inputs are synthetic. No physical memory, device, firmware,\ninstalled boot artifacts, root operation, or running kernel is accessed.\n",
+      "compiler": "clang version 23.1.4",
+      "page_shift": 12,
+      "ubsan": false,
+      "actual_of_scan_fragments_sha256": "aada96ab87f1517c2f208be49a7da8afc2d6fba06ebd175555b400d585b07141",
+      "cases": 836,
+      "checks": {
+        "optout": 6,
+        "success": 2,
+        "precommit_refusals": 52,
+        "panic_after_mutation": 12,
+        "parser_atomic": 13,
+        "guarded_prefix_refusals": 740,
+        "bad_fdt_atomic": 5,
+        "mapping_and_phase_regressions": 6
+      },
+      "warnings": 0,
+      "normal_optout_no_access": true,
+      "reserve_all_before_any_add": true,
+      "original_fdt_never_modified": true,
+      "gpu_disabled_after_preparation": true,
+      "precommit_refusal_no_gpu_reservation_or_memory_mutation": true,
+      "commit_failures_stop_boot_via_panic": true,
+      "built_mutants_rejected": 4,
+      "actual_mapping_guard_sha256": "9a76b155d92f5ca02ce75a3c002c8055a961fe031438fff61b61298b96d8a670",
+      "actual_fdt_verify_and_root_scan_sha256": "41e32840d9afa8dba74d380bc6a5b1d6b0cf80fe905ee7b063680944c9edba3b",
+      "actual_source_hook_after_reservations_before_paging": true,
+      "actual_source_publication_after_paging_before_unflatten": true,
+      "limits": "Actual static OF reservation scan, FDT verify/root scan and ARM64 mapping-safety function bodies run with modeled services and synthetic 48-bit PA PTE helpers. CRC uses a hosted scalar implementation. Kernel services, EFI descriptors, allocators, paging/linear mapping and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
+    },
+    "ubsan14": {
       "scope": "Compile actual early GPU metadata/runtime source against modeled kernel services.\n\nAll addresses and inputs are synthetic. No physical memory, device, firmware,\ninstalled boot artifacts, root operation, or running kernel is accessed.\n",
       "compiler": "gcc (GCC) 16.1.1 20260430",
       "page_shift": 14,
       "ubsan": true,
       "actual_of_scan_fragments_sha256": "aada96ab87f1517c2f208be49a7da8afc2d6fba06ebd175555b400d585b07141",
-      "cases": 830,
+      "cases": 836,
       "checks": {
         "optout": 6,
         "success": 2,
@@ -152,7 +178,8 @@
         "panic_after_mutation": 12,
         "parser_atomic": 13,
         "guarded_prefix_refusals": 740,
-        "bad_fdt_atomic": 5
+        "bad_fdt_atomic": 5,
+        "mapping_and_phase_regressions": 6
       },
       "warnings": 0,
       "normal_optout_no_access": true,
@@ -161,43 +188,76 @@
       "gpu_disabled_after_preparation": true,
       "precommit_refusal_no_gpu_reservation_or_memory_mutation": true,
       "commit_failures_stop_boot_via_panic": true,
-      "built_mutants_rejected": 3,
+      "built_mutants_rejected": 4,
+      "actual_mapping_guard_sha256": "9a76b155d92f5ca02ce75a3c002c8055a961fe031438fff61b61298b96d8a670",
+      "actual_fdt_verify_and_root_scan_sha256": "41e32840d9afa8dba74d380bc6a5b1d6b0cf80fe905ee7b063680944c9edba3b",
       "actual_source_hook_after_reservations_before_paging": true,
-      "limits": "Actual static OF reservation scan bodies run with modeled getters, callbacks and memblock. Kernel services, EFI descriptors, allocators, early mappings and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
+      "actual_source_publication_after_paging_before_unflatten": true,
+      "limits": "Actual static OF reservation scan, FDT verify/root scan and ARM64 mapping-safety function bodies run with modeled services and synthetic 48-bit PA PTE helpers. CRC uses a hosted scalar implementation. Kernel services, EFI descriptors, allocators, paging/linear mapping and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof."
     }
   },
-  "target_objects": {
-    "compiler": "clang version 23.1.4",
-    "config_APPLE_T6034_GPU_EARLY_MEMORY": true,
-    "page_shift": 14,
-    "actual_make_objects": 12,
-    "object_sha256": {
-      "arch/arm64/mm/init.o": "bd6db6b80ae2b08da361f2196f4f71e866e7f95efb2943bbdaec9f5456add64f",
-      "arch/arm64/mm/asahi-gpu-memory.o": "550619722fbf279c4a042c27a3720450c1c9c4d7ab5c57f2e8ee8064e2fbd54a",
-      "arch/arm64/mm/asahi-gpu-memory-data.o": "2af518a3a83c185f424004f15c45a5e7249bec84dcd4b89349b4f4ef04e5247c",
-      "lib/fdt_check.o": "4168fcbb98c2cac01f79bf5054fb3401d53e3a3eb01d182bfee19faa4a310f31",
-      "lib/fdt.o": "d146a1820b6f98bc8690f1b9f3097b23d1d1242f635178a39c2e91e72521291f",
-      "lib/fdt_ro.o": "56f4c3fc0e51fbcd2982cf7e1a1f8223253d6e1bba0781618b63419493ea7c70",
-      "lib/fdt_rw.o": "6ab87352d2923318c334672e43b245c467095d7caf2e4275cfe7643930c00844",
-      "lib/fdt_wip.o": "6192fcd94b711f099583d3006074fb6c775726a585000f192e75c91fb991e2af",
-      "lib/fdt_sw.o": "4f9acddf4a50e64e54f8c518d22d372d8e0b9b8710d0ed31c477ec3b5d01b86b",
-      "lib/fdt_addresses.o": "420fffb4323efdcea7a16426ceb08da7f08d09547bb590af2067cb47b81aeaa5",
-      "lib/fdt_empty_tree.o": "0e51c9941acf191f2bca63a7c9597494eb43adf8c9c6c4ae3eaeab076142ecb4",
-      "lib/fdt_strerror.o": "ad5213ad13ce8553cddf5d4ed55b40b826facff032479d05b14700b2eb95d4d7"
+  "target": {
+    "scope": "Compiled source-object checks only; no private image/config commitment",
+    "kernel_release": "7.2.11-m3max-mem2",
+    "full_kernel_modules_dtbs_build_completed": true,
+    "object_checks": {
+      "arch/arm64/kernel/setup.o": {
+        "enabled_expected_reference": true,
+        "disabled_no_gpu_hook_reference": true
+      },
+      "arch/arm64/mm/init.o": {
+        "enabled_expected_reference": true,
+        "disabled_no_gpu_hook_reference": true
+      },
+      "arch/arm64/mm/asahi-gpu-memory.o": {
+        "no_fp_simd_operands": true
+      },
+      "arch/arm64/mm/asahi-gpu-memory-data.o": {
+        "no_fp_simd_operands": true
+      }
     },
-    "init_object_references_actual_early_hook": true,
-    "partial_link_no_unresolved_fdt_symbols": true,
-    "new_runtime_and_parser_have_no_FP_SIMD_registers": true,
-    "full_vmlinux_linked": false,
-    "limits": "Actual Make-built ARM64 objects, relocatable partial link and emitted-instruction inspection only; no full kernel/image, installation, boot or hardware test.",
-    "config_disabled_init_has_no_early_hook_reference": true,
-    "disabled_init_sha256": "7f310f91e0bbd5aa49675e1752bddd0cd349bd3a4730352979e879f1f7a04c35"
+    "source_object_sha256": {
+      "arch/arm64/kernel/setup.o": "bce55a3de64821bd0b14c287b5ffa10b6cde58ac805189fca826626fc0035825",
+      "arch/arm64/mm/init.o": "8dc5bdbaeddc0808ca631973286c28c053cf9a709256d0c45f23c3774655597b",
+      "arch/arm64/mm/asahi-gpu-memory.o": "f85da5e1b9783bda57e27fbeccf5fd99b056fc661576ee977705fc58cddfcc7d",
+      "arch/arm64/mm/asahi-gpu-memory-data.o": "da86c4a0f4acf65b44e769de54c93428d17973d3da92df57e81dd5acbf44be9b"
+    }
   },
-  "live_metadata_shape_only": {
-    "scope": "Unprivileged live FDT metadata, copied into private CPU buffers; layout uses invented addresses. No retained ADT payload, MMIO, firmware, kernel mutation, installation or private-input digest.",
-    "metadata_tree_copy_succeeded": true,
-    "retained_ADT_owner_metadata_shape_accepted": true,
-    "live_metadata_shape_accepts_synthetic_layout_plan": true,
-    "original_CPU_copy_unchanged": true
-  }
+  "full_kernel_cpu_regressions": {
+    "old": {
+      "scope": "CPU-only full-kernel regression using entirely invented boot metadata.\n\nRuns an ARM64 kernel under QEMU TCG, with synthetic EFI handoff tables and\nretained ADT bytes injected into guest RAM. There is no EFI firmware execution,\nMac hardware, GPU emulation/passthrough, host device, private input or root disk.\nThis exercises the kernel's real early-memory/paging/OF path, not GPU startup.\n",
+      "all_boot_metadata_invented": true,
+      "no_gpu_device_or_passthrough": true,
+      "invented_fdt_restored_before_any_kernel_instruction": true,
+      "synthetic_efi_recognized": true,
+      "memory_preparation_accepted": false,
+      "old_mapping_guard_bug_seen": true,
+      "owned_guest_stopped_after_expected_early_bug": true,
+      "guest_timed_out": false,
+      "reaches_expected_no_root_disk_panic": false,
+      "physical_gpu_or_mac_efi_stub_test": false
+    },
+    "fixed": {
+      "scope": "CPU-only full-kernel regression using entirely invented boot metadata.\n\nRuns an ARM64 kernel under QEMU TCG, with synthetic EFI handoff tables and\nretained ADT bytes injected into guest RAM. There is no EFI firmware execution,\nMac hardware, GPU emulation/passthrough, host device, private input or root disk.\nThis exercises the kernel's real early-memory/paging/OF path, not GPU startup.\n",
+      "all_boot_metadata_invented": true,
+      "no_gpu_device_or_passthrough": true,
+      "invented_fdt_restored_before_any_kernel_instruction": true,
+      "synthetic_efi_recognized": true,
+      "memory_preparation_accepted": true,
+      "old_mapping_guard_bug_seen": false,
+      "owned_guest_stopped_after_expected_early_bug": false,
+      "guest_timed_out": false,
+      "reaches_expected_no_root_disk_panic": true,
+      "physical_gpu_or_mac_efi_stub_test": false
+    }
+  },
+  "invented_fdt_adt_efi_bytes_identical_between_old_new_runs": true,
+  "deterministic_padding_python_tests": 2,
+  "old_image_release": "7.2.11-m3max-mem1",
+  "fixed_image_release": "7.2.11-m3max-mem2",
+  "private_artifact_or_device_commitments_published": false,
+  "fixed_image_installed_or_armed": false,
+  "mac_failure_cause_confirmed": false,
+  "gpu_firmware_ready": false,
+  "accelerated_workload_demonstrated": false
 }

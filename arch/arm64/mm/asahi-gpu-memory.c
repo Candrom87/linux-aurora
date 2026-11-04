@@ -10,7 +10,6 @@
 #include <linux/string.h>
 #include <asm/early_ioremap.h>
 #include <asm/memory.h>
-#include <asm/mmu.h>
 #include "asahi-gpu-memory.h"
 
 /* Only staging buffers live in init memory. The published tree is copied to
@@ -19,6 +18,9 @@
 static u8 adt_copy[AGM_MAX_BLOB] __initdata __aligned(8);
 static u8 planned_fdt[AGM_MAX_BLOB] __initdata __aligned(8);
 static int requested __initdata;
+static phys_addr_t staged_tree __initdata;
+static int staged_tree_size __initdata;
+static struct agm_layout staged_layout __initdata;
 
 static int __init request_memory(char *arg)
 {
@@ -114,12 +116,34 @@ static int __init copy_tree(phys_addr_t dest, size_t size)
 	return 0;
 }
 
+static void __init verify_ownership(const struct agm_layout *layout)
+{
+	u64 pa;
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		struct agm_span s = layout->uat[i];
+
+		if (!reserved_full(s))
+			panic("T6034 GPU memory lost reservation");
+		if (i == 2) {
+			if (memblock_overlaps_region(&memblock.memory, s.base, s.size))
+				panic("T6034 GPU handoff acquired a linear alias");
+		} else {
+			if (!memblock_is_region_memory(s.base, s.size))
+				panic("T6034 GPU table memory incomplete");
+			for (pa = s.base; pa < s.base + s.size; pa += PAGE_SIZE)
+				if (!memblock_is_map_memory(pa))
+					panic("T6034 GPU table memory is not mapped");
+		}
+	}
+}
+
 static int __init prepare(u64 linear_size)
 {
 	struct agm_layout layout;
 	struct agm_span source;
 	phys_addr_t new_tree;
-	void *mapped;
 	u64 pa;
 	int ret, size, i;
 
@@ -170,30 +194,15 @@ static int __init prepare(u64 linear_size)
 	for (i = 0; i < 4; i++)
 		if (i != 2 && memblock_add(layout.uat[i].base, layout.uat[i].size))
 			panic("T6034 GPU table memory commit failed");
-	mapped = fixmap_remap_fdt(new_tree, &size, PAGE_KERNEL_RO);
-	if (!mapped || !early_init_dt_verify(mapped, new_tree))
-		panic("T6034 GPU memory tree publication failed");
-	/* Refresh static owner inventory/counts for the later OF scan. The
-	 * planner rejects active dynamic size/alignment reservations, so this
-	 * cannot allocate/initialize a dynamic region a second time.
+	verify_ownership(&layout);
+	/* The existing FDT fixmap is live: replacing its PFNs violates the
+	 * ARM64 mapping guard (and would invalidate earlier FDT pointers).
+	 * Keep it intact. paging_init() will map this separately reserved
+	 * normal-RAM copy, which we publish before unflattening the tree.
 	 */
-	early_init_fdt_scan_reserved_mem();
-	for (i = 0; i < 4; i++) {
-		struct agm_span s = layout.uat[i];
-
-		if (!reserved_full(s))
-			panic("T6034 GPU memory lost reservation");
-		if (i == 2) {
-			if (memblock_overlaps_region(&memblock.memory, s.base, s.size))
-				panic("T6034 GPU handoff acquired a linear alias");
-		} else {
-			if (!memblock_is_region_memory(s.base, s.size))
-				panic("T6034 GPU table memory incomplete");
-			for (pa = s.base; pa < s.base + s.size; pa += PAGE_SIZE)
-				if (!memblock_is_map_memory(pa))
-					panic("T6034 GPU table memory is not mapped");
-		}
-	}
+	staged_tree = new_tree;
+	staged_tree_size = size;
+	staged_layout = layout;
 	return 0;
 }
 
@@ -206,6 +215,33 @@ void __init asahi_gpu_early_memory(bool unrestricted, u64 linear_size)
 	ret = requested == 1 && unrestricted ? prepare(linear_size) : -EINVAL;
 	if (ret)
 		pr_warn("T6034 GPU memory not prepared (%d); GPU remains disabled\n", ret);
-	else
-		pr_info("T6034 GPU memory prepared; GPU remains disabled\n");
+}
+
+void __init asahi_gpu_publish_memory(void)
+{
+	struct agm_span source;
+	void *mapped;
+	u64 pa;
+	int size;
+
+	if (!staged_tree)
+		return;
+	source = (struct agm_span){ staged_tree, PAGE_ALIGN(staged_tree_size) };
+	if (!reserved_full(source) ||
+	    !memblock_is_region_memory(source.base, source.size))
+		panic("T6034 GPU memory tree reservation lost");
+	for (pa = source.base; pa < source.base + source.size; pa += PAGE_SIZE)
+		if (!memblock_is_map_memory(pa))
+			panic("T6034 GPU memory tree is not mapped");
+	mapped = phys_to_virt(staged_tree);
+	size = fdt_totalsize(mapped);
+	if (size != staged_tree_size || !early_init_dt_verify(mapped, staged_tree))
+		panic("T6034 GPU memory tree publication failed");
+	/* Refresh static owner inventory/counts before unflattening. Dynamic
+	 * size/alignment regions were refused before the reservation commit.
+	 */
+	early_init_fdt_scan_reserved_mem();
+	verify_ownership(&staged_layout);
+	staged_tree = 0;
+	pr_info("T6034 GPU memory prepared; GPU remains disabled\n");
 }

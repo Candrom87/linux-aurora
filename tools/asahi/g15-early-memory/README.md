@@ -14,7 +14,7 @@ load into an active desktop. No GPU-compatible match, active G15 profile, GPU
 power operation, firmware admission/start, READY or accelerated workload is
 added. The GPU node stays disabled even on successful preparation.
 
-The hook executes at the end of `arm64_memblock_init`, after ordinary reserved
+The reservation hook executes at the end of `arm64_memblock_init`, after ordinary reserved
 memory and initrd/kernel reservation, before `paging_init`. This is after EFI
 has rebuilt memblock's memory list from its map. Both source order and the
 actual enabled/disabled `init.o` references are checked. A `mem=` restriction
@@ -66,6 +66,10 @@ outside memblock memory, excluding its standard linear alias; tables retain
 the intended reserved normal-RAM/WB policy. No GPU table/handoff contents are
 read or written. No GPU registers are accessed.
 
+Publication is a separate phase immediately after `paging_init()` and before
+device-tree unflattening. It uses the reserved copy's normal linear mapping;
+the original FDT fixmap remains intact for any earlier pointers. The copy's
+reservation, normal-memory membership and mapping class are checked first.
 After tree publication, actual early verification refreshes the flat-tree
 pointer, physical pointer, root cells and CRC. The reservation scan refreshes
 static inventory counts for the later unflatten/owner scan. Every region's
@@ -91,33 +95,91 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B tools/asahi/g15-early-memory/check.py \
 
 Repeat with `--page-shift 12`, a working Clang compiler, or GCC `--ubsan`.
 The canonical receipt binds every production/test input and extracted OF body.
-Each GCC/Clang granule run and the GCC UBSan run passes 830 checks: 85 runtime/
+Each GCC/Clang granule run and the GCC UBSan run passes 836 checks: 85 runtime/
 parser scenarios, 740 incomplete ADT prefixes ending exactly at an inaccessible
-anonymous CPU page, and five malformed FDT controls. Three compiled mutants
+anonymous CPU page, five malformed FDT controls and six mapping/phase checks.
+Four compiled mutants
 fail their intended assertions. Precommit refusals, reserve-before-add order,
 copied-tree lifetime, GPU-disabled state and post-mutation panic paths are covered.
 
 Actual static OF reservation scan bodies run, including their owner counts.
+The actual FDT verification and root-cell scan bodies also run, checking the
+published virtual/physical pointers, root cells and CRC update. CRC uses a
+hosted scalar implementation; no kernel page table is accessed.
 Getters, node callbacks, allocators, EFI map, early mappings and panic are
-modeled. No real memblock allocator, OF driver callback, early boot or hardware
+modeled. The unchanged ARM64 `pgattr_change_is_safe()` body also runs against
+synthetic 48-bit physical-address PTE helpers. A live valid-to-valid PFN change
+is rejected; creating a mapping and changing only permissions are controls.
+The fourth mutant reinstates the old FDT fixmap replacement and must fail at
+that exact guard. Separate checks forbid publication before modeled paging,
+verify original-tree lifetime and make repeated publication a no-op.
+No real memblock allocator, OF driver callback, page table, early boot or hardware
 is executed by the host fixture. Source order checks cover the real placement
-of the hook before paging. All children have 60-second execution limits.
+of reservations before paging and publication after paging/before unflattening.
+All children have 60-second execution limits.
 
-The target check builds twelve real ARM64 kernel/libfdt objects with the option
-enabled at 16-KiB granularity. A relocatable partial link resolves all fdt_*
-references. The enabled init object references the hook; a separately rebuilt
-disabled-config init object does not. Runtime/parser emitted instructions contain
-no FP/SIMD registers. This is not a full vmlinux/Image link. The libfdt full
-checker was declared but absent from the kernel's built subset; its unchanged
-dual-licensed implementation is now built only for the new option.
+The target check now builds a complete ARM64 Image, modules and DTBs with the
+option enabled at 16-KiB granularity. Separately built disabled-config setup/init
+objects verify that neither phase is referenced when disabled. Enabled objects
+reference their respective hooks. Runtime/parser emitted instructions contain
+no FP/SIMD registers. The full libfdt checker was declared but absent from the
+kernel's built subset; its unchanged dual-licensed implementation is built only
+for the new option. These are build checks, not physical hardware qualification.
 
 A separate unprivileged live-FDT shape check used a private CPU copy and an
 invented layout. It accepted the metadata template, not actual GPU extents.
 No private artifact/digest was retained or published, and no ADT payload was
 read by that check.
 
-No image was installed or armed. Before any hardware use, prepare the complete
+## Failed mem1 boot and correction
+
+The original a3369351c path called `fixmap_remap_fdt()` with a different
+physical copy while the original mapping was still valid. That reaches
+`init_pte()` through `create_mapping_noalloc()`; the actual ARM64 guard forbids
+changing a live mapping's PFN. The old host mapping stub missed this rule.
+The two-phase publication above avoids both that violation and invalidating
+earlier FDT pointers. It does not relax the guard or replace live PTEs.
+
+The separately authorized mem1 hardware attempt produced a user-reported black
+screen and restart, with subsequent normal stock return and cleared live/saved
+one-shot verified. No crash log identified the failing stage, so reaching this
+source defect during that attempt remains unproven. A CPU-only kernel boot
+without the Mac EFI/metadata path does not establish the activated path works.
+The corrected source has not been installed or armed. Before any hardware use, prepare the complete
 reviewed one-shot image/procedure and verify normal Linux fallback. The new
 metadata/early-mapping experiment requires its own authorization; fulfilled
 collector approvals cannot be reused. Firmware identity/ABI, native same-boot
 board inputs, power/suppliers, complete startup and real GPU work remain open.
+
+## Full-kernel CPU regression
+
+`cpu_boot.py` runs the actual built kernel under QEMU TCG with Cortex-A76 and
+entirely invented EFI handoff tables, retained ADT and FDT metadata. It does not
+execute EFI firmware or emulate/pass through a GPU or any host device. The
+ordinary emulated RAM backs the invented excluded extents. EFI runtime services
+are disabled; no root disk is attached. No kernel test-only admission bypass is
+added. The original metadata parser/planner validates the invented inputs first.
+
+QEMU normally rewrites a supplied FDT's RAM range, losing the intended
+exclusions. An owned debugger connection restores and reads back the validated
+invented tree in guest RAM before any kernel instruction executes. The fixture
+asserts the QEMU direct-boot trampoline format and the guest RAM bounds. It
+uses a local Unix socket and runs without OS administrator privileges; an
+execution sandbox may require permission for that socket. All guest processes
+are bounded and terminated when done. Guest entropy is removed for deterministic
+old/new input comparison; no host or private metadata is used.
+
+```sh
+python3 -B tools/asahi/g15-early-memory/cpu_boot.py --kernel . \
+  --image /path/to/new/Image --qemu /path/to/qemu-system-aarch64 \
+  --out /tmp/fdt-cpu-new
+```
+
+The old exact mem1 Image is tested with the same script and
+`--expect-old-pfn-bug`. It must reach the `init_pte()` mapping-safety BUG source
+line through `fixmap_remap_fdt()` and is stopped there. The corrected Image must
+report successful preparation and continue through paging/OF setup to the
+expected no-root-disk panic. The canonical receipt records both outcomes.
+This validates this kernel path with real emulated page tables; it neither
+explains the unlogged Mac failure conclusively nor qualifies firmware history,
+Apple cache behavior, driver startup, or a single GPU workload.

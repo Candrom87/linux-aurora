@@ -19,7 +19,9 @@ int agm_fdt_plan(const void *blob, size_t size, void *scratch, size_t capacity,
 
 #ifdef CONFIG_APPLE_T6034_GPU_EARLY_MEMORY
 void __init asahi_gpu_early_memory(bool unrestricted, u64 linear_size);
+void __init asahi_gpu_publish_memory(void);
 #else
 static inline void asahi_gpu_early_memory(bool unrestricted, u64 linear_size) {}
+static inline void asahi_gpu_publish_memory(void) {}
 #endif
 #endif

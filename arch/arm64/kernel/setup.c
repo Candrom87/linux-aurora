@@ -55,6 +55,8 @@
 #include <asm/xen/hypervisor.h>
 #include <asm/mmu_context.h>
 
+#include "../mm/asahi-gpu-memory.h"
+
 static int num_standard_resources;
 static struct resource *standard_resources;
 
@@ -332,6 +334,7 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	arm64_memblock_init();
 
 	paging_init();
+	asahi_gpu_publish_memory();
 
 	acpi_table_upgrade();
 

@@ -48,7 +48,12 @@ def main():
     inputs = sources + [mm / 'asahi-gpu-memory.c', mm / 'asahi-gpu-memory.h',
                         mm / 'init.c', mm / 'Makefile', root / 'arch/arm64/Kconfig.platforms',
                         root / 'arch/arm64/kernel/setup.c',
-                        root / 'drivers/of/of_reserved_mem.c', root / 'lib/Makefile', root / 'lib/fdt_check.c',
+                        mm / 'mmu.c', mm / 'fixmap.c',
+                        root / 'arch/arm64/include/asm/pgtable-hwdef.h',
+                        root / 'arch/arm64/include/asm/pgtable-prot.h',
+                        root / 'arch/arm64/include/asm/memory.h',
+                        root / 'drivers/of/of_reserved_mem.c', root / 'drivers/of/fdt.c',
+                        root / 'lib/Makefile', root / 'lib/fdt_check.c',
                         HERE / 'support.h', Path(__file__).resolve()] + sorted(libfdt.glob('*.h'))
     pins = {str(f.relative_to(root)): hashlib.sha256(f.read_bytes()).hexdigest() for f in inputs}
     init = (mm / 'init.c').read_text()
@@ -60,6 +65,9 @@ def main():
     setup = (root / 'arch/arm64/kernel/setup.c').read_text()
     if setup.count('arm64_memblock_init();') != 1 or setup.count('paging_init();') != 1 or setup.index('arm64_memblock_init();') > setup.index('paging_init();'):
         raise ValueError('actual ARM64 setup no longer places memory preparation before paging')
+    publish = 'asahi_gpu_publish_memory();'
+    if (setup.count(publish) != 1 or not setup.index('paging_init();') < setup.index(publish) < setup.index('unflatten_device_tree();')):
+        raise ValueError('actual FDT publication is not after paging and before unflattening')
     with tempfile.TemporaryDirectory(prefix='g15c-kernel-early-cpu-') as directory:
         tmp = Path(directory)
         for name in ('linux/types.h', 'linux/init.h', 'linux/limits.h',
@@ -73,6 +81,18 @@ def main():
         (tmp / 'linux/libfdt.h').write_text('#include <libfdt.h>\n')
         runtime = (mm / 'asahi-gpu-memory.c').read_text()
         (tmp / 'actual_runtime.c').write_text(runtime)
+        mapping = (mm / 'mmu.c').read_text()
+        guard_start = mapping.index('bool pgattr_change_is_safe(pteval_t old, pteval_t new)\n{')
+        guard = mapping[guard_start:mapping.index('\n}\n', guard_start) + 3]
+        (tmp / 'actual_mapping_guard.inc').write_text(guard)
+        fdt_source = (root / 'drivers/of/fdt.c').read_text()
+        verification = ''
+        for name in ('early_init_dt_scan_root', 'early_init_dt_verify'):
+            matches = list(re.finditer(r'(?m)^(?:[A-Za-z_]\w*[ \t*]+)+' + re.escape(name) + r'\([^;{}]*\)\n\{', fdt_source))
+            if len(matches) != 1: raise ValueError('actual FDT publication verification extraction changed')
+            start = matches[0].start(); end = fdt_source.index('\n}\n', start) + 3
+            verification += fdt_source[start:end] + '\n'
+        (tmp / 'actual_verify.inc').write_text(verification)
         reserved = (root / 'drivers/of/of_reserved_mem.c').read_text()
         scanner = ''
         for name in ('early_init_dt_reserve_memory', '__reserved_mem_reserve_reg',
@@ -97,7 +117,10 @@ def main():
             ('if (i != 2 && memblock_add', 'if (memblock_add', 'valid source panicked'),
             ('if (intersects(l->uat[i], md->phys_addr, size))',
              'if (false && intersects(l->uat[i], md->phys_addr, size))', 'unsafe source accepted'),
-            ('!reserved_full(source)', 'false', 'unsafe source accepted'),
+            ('!reserved_full(source))\n\t\treturn -EINVAL;', 'false)\n\t\treturn -EINVAL;', 'unsafe source accepted'),
+            ('mapped = phys_to_virt(staged_tree);',
+             'mapped = fixmap_remap_fdt(staged_tree, &size, PAGE_KERNEL_RO);',
+             'valid source panicked: ARM64 live-PFN guard'),
         )
         for index, (old, new, error) in enumerate(mutations):
             if runtime.count(old) != 1:
@@ -116,8 +139,11 @@ def main():
                'page_shift': a.page_shift, 'source_sha256': pins,
                'ubsan': a.ubsan,
                'actual_of_scan_fragments_sha256': hashlib.sha256(scanner.encode()).hexdigest(), **outcome,
+               'actual_mapping_guard_sha256': hashlib.sha256(guard.encode()).hexdigest(),
+               'actual_fdt_verify_and_root_scan_sha256': hashlib.sha256(verification.encode()).hexdigest(),
                'actual_source_hook_after_reservations_before_paging': True,
-               'limits': 'Actual static OF reservation scan bodies run with modeled getters, callbacks and memblock. Kernel services, EFI descriptors, allocators, early mappings and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof.'}
+               'actual_source_publication_after_paging_before_unflatten': True,
+               'limits': 'Actual static OF reservation scan, FDT verify/root scan and ARM64 mapping-safety function bodies run with modeled services and synthetic 48-bit PA PTE helpers. CRC uses a hosted scalar implementation. Kernel services, EFI descriptors, allocators, paging/linear mapping and panic are modeled. Actual Make-object compilation is separate. No boot, firmware identity, physical ownership/history, cache coherency or acceleration proof.'}
     if a.receipt:
         with a.receipt.open('x') as stream:
             json.dump(receipt, stream, indent=2)
@@ -163,6 +189,7 @@ def exercise(path):
     sig('fixture_reset', [V, V, C.c_size_t], None)
     sig('fixture_control', [I, Q], None); sig('fixture_request', [S])
     sig('fixture_run', [I, Q]); sig('fixture_query', [I], Q); sig('fixture_tree', [], V)
+    sig('fixture_stage_only', [I, Q]); sig('fixture_publish', [])
     sig('fdt_create_empty_tree', [V, I]); sig('fdt_path_offset', [V, S])
     sig('fdt_add_subnode', [V, I, S]); sig('fdt_setprop_namelen', [V, I, S, I, V, I])
     sig('fdt_set_name', [V, I, S])
@@ -207,7 +234,8 @@ def exercise(path):
         raw = C.create_string_buffer(adt(variant)); raw_refs[:] = [raw]
         lib.fixture_reset(dt, raw, len(raw) - 1)
     cases = {'optout': 0, 'success': 0, 'precommit_refusals': 0, 'panic_after_mutation': 0,
-             'parser_atomic': 0, 'guarded_prefix_refusals': 0, 'bad_fdt_atomic': 0}
+             'parser_atomic': 0, 'guarded_prefix_refusals': 0, 'bad_fdt_atomic': 0,
+             'mapping_and_phase_regressions': 0}
     dt = tree(); reset(dt)
     if lib.fixture_run(1, 0x1000000) or any(lib.fixture_query(i) for i in range(1, 12)):
         raise ValueError('opt-out performed work')
@@ -226,12 +254,14 @@ def exercise(path):
     def accepted(dt, padding=False):
         if padding: setp(dt, '/chosen', 'synthetic-padding', b'x' * 40000)
         reset(dt); before = bytes(dt); lib.fixture_request(b'1')
-        if lib.fixture_run(1, 0x1000000): raise ValueError('valid source panicked')
+        if lib.fixture_run(1, 0x1000000):
+            raise ValueError('valid source panicked: ARM64 live-PFN guard' if lib.fixture_query(16) else 'valid source panicked')
         if not lib.fixture_query(9): raise ValueError('valid source not published')
         if lib.fixture_query(10): raise ValueError('handoff gained memory')
         if lib.fixture_query(8) or (lib.fixture_query(1), lib.fixture_query(2)) != (4, 3):
             raise ValueError('reserve-before-add order changed')
         if lib.fixture_query(12) != 5: raise ValueError('actual OF inventory count stale')
+        if not lib.fixture_query(17): raise ValueError('actual FDT pointer/physical pointer/root cells/CRC update missing')
         if bytes(dt) != before: raise ValueError('original tree modified')
         out = lib.fixture_tree()
         if getp(out, '/gpu', 'status') != b'disabled\0': raise ValueError('GPU enabled')
@@ -245,6 +275,22 @@ def exercise(path):
             raise ValueError('table memory publication mismatch')
         cases['success'] += 1
     accepted(tree()); accepted(tree(), True)
+    # This is the actual ARM64 source guard, with synthetic PTE helpers.
+    if lib.fixture_query(13) or not lib.fixture_query(14) or not lib.fixture_query(15):
+        raise ValueError('actual ARM64 guard no longer rejects live PFN replacement')
+    cases['mapping_and_phase_regressions'] += 3
+    dt = tree(); reset(dt); lib.fixture_request(b'1')
+    if lib.fixture_stage_only(1, 0x1000000) or lib.fixture_query(9) or lib.fixture_query(7):
+        raise ValueError('tree published before paging')
+    if not lib.fixture_publish():
+        raise ValueError('fixture failed to reject a pre-paging linear map access')
+    cases['mapping_and_phase_regressions'] += 2
+    dt = tree(); reset(dt); lib.fixture_request(b'1')
+    if lib.fixture_run(1, 0x1000000): raise ValueError('valid source panicked')
+    scans, logs = lib.fixture_query(7), lib.fixture_query(6)
+    if lib.fixture_publish() or lib.fixture_query(7) != scans or lib.fixture_query(6) != logs:
+        raise ValueError('duplicate publication performed work')
+    cases['mapping_and_phase_regressions'] += 1
     def refused(dt, control=None, variant=None, unrestricted=1, linear=0x1000000, free=0):
         reset(dt, variant); before = bytes(dt)
         if control:

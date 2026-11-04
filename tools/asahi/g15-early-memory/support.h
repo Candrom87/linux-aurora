@@ -76,6 +76,7 @@ int copy_from_early_mem(void *dest, u64 source, unsigned long size);
 void *early_memremap(u64 dest, unsigned long size);
 void early_memunmap(void *map, unsigned long size);
 void *fixmap_remap_fdt(u64 phys, int *size, int protection);
+void *phys_to_virt(u64 phys);
 bool early_init_dt_verify(void *fdt, u64 phys);
 void early_init_fdt_scan_reserved_mem(void);
 #endif
