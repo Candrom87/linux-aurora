@@ -42,6 +42,18 @@ pub(crate) enum Platform {
     DeviceTree,
 }
 
+/// Host mapping contract for the firmware-shared PPL handoff page only.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum HandoffMemory {
+    /// Preserve the existing per-region WB/reserved-RAM or WC/carveout policy.
+    Region,
+    /// Exact J514M/T6034 boot-owned no-map DRAM, with no standard linear WB
+    /// alias. Both adopted-UAT mappings must classify it as Normal-NC.
+    /// No current configuration selects this experimental contract.
+    #[allow(dead_code)]
+    NoMapNormalNc,
+}
+
 /// The source of the board images (HardwareData, Globals, Power) of a SoC.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Board {
@@ -190,6 +202,7 @@ pub(crate) mod t6030 {
         ],
         machine: kernel::c_str!("apple,t6030"),
         platform: super::Platform::AdtWithPmp,
+        handoff_memory: super::HandoffMemory::Region,
         layout: &LAYOUT,
         board: super::Board::Templates,
         compute: COMPUTE,

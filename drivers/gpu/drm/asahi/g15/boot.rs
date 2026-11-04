@@ -77,6 +77,7 @@ pub(crate) mod glue {
         pub(crate) fn asahi_g15_pmp_ready() -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_put(dev: *mut core::ffi::c_void);
         fn asahi_g15_reserved_uat(index: u32, start: u64, size: u64) -> bool;
+        fn asahi_g15_handoff_nc(dev: *mut core::ffi::c_void, start: u64, size: u64) -> bool;
     }
 
     /// SHA-256 (`sha256()`).
@@ -97,6 +98,13 @@ pub(crate) mod glue {
     pub(crate) fn reserved_uat(index: u32, start: u64, size: u64) -> bool {
         // SAFETY: Queries and releases OF nodes; no physical memory is accessed.
         unsafe { asahi_g15_reserved_uat(index, start, size) }
+    }
+
+    /// Checks exact boot ownership and absence of the standard Linux linear
+    /// WB alias. Does not map memory, touch hardware or qualify coherency.
+    pub(crate) fn handoff_nc(dev: &device::Device, start: u64, size: u64) -> bool {
+        // SAFETY: `dev` is live; helper only queries OF/resource/PFN metadata.
+        unsafe { asahi_g15_handoff_nc(dev.as_raw().cast(), start, size) }
     }
 
     /// Whether the machine carries `compatible` (`of_machine_is_compatible()`).

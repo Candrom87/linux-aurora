@@ -168,6 +168,29 @@ impl Adt<'_> {
         None
     }
 
+    /// A unique child with an exact complete name property. The separate
+    /// no-map handoff contract must not inherit the legacy prefix matching.
+    /// Called only after complete structural validation by node_end.
+    fn child_exact(&self, node: usize, name: &[u8]) -> Option<usize> {
+        let props = le32(self.data, node)?;
+        let children = le32(self.data, node + 4)?;
+        let mut off = node + 8;
+        for _ in 0..props {
+            off += 36 + ((le32(self.data, off + 32)? & 0x7fffffff) as usize).next_multiple_of(4);
+        }
+        let mut found = None;
+        for _ in 0..children {
+            if self.prop(off, "name") == Some(name) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(off);
+            }
+            off = self.node_end(off, 1)?;
+        }
+        found
+    }
+
     fn u64(&self, node: usize, name: &str) -> Option<u64> {
         let p = self.prop(node, name)?;
         if p.len() != 8 {
@@ -518,8 +541,47 @@ fn sensor_rows(dev: &device::Device) -> Result<[[u8; 12]; record::SENSOR_ROW_COU
 /// source the SoC configuration names.
 pub(crate) fn read(dev: &device::Device, cfg: &super::Config) -> Result<GpuAdt> {
     if cfg.platform == hw::Platform::DeviceTree {
-        return from_device_tree(dev);
+        let out = from_device_tree(dev)?;
+        if cfg.handoff_memory == hw::HandoffMemory::NoMapNormalNc {
+            if cfg.chip_id != 0x6034 {
+                return Err(EINVAL);
+            }
+            admit_handoff_nc(dev, &out)?;
+        }
+        return Ok(out);
+    }
+    if cfg.handoff_memory != hw::HandoffMemory::Region {
+        return Err(EINVAL);
     }
     let copy = copy()?;
     parse(dev, &Adt { data: &copy })
+}
+
+/// Source provenance for the separate no-map handoff contract. A no-map MMIO
+/// range is not DRAM merely because no linear mapping exists. Compare the
+/// exact FDT range to this boot's retained ADT and physical DRAM bounds first.
+fn admit_handoff_nc(dev: &device::Device, out: &GpuAdt) -> Result {
+    let copy = copy()?;
+    let adt = Adt { data: &copy };
+    adt.node_end(0, 0).ok_or(EINVAL)?;
+    let chosen = adt.child_exact(0, b"chosen\0").ok_or(EINVAL)?;
+    let armio = adt.child_exact(0, b"arm-io\0").ok_or(EINVAL)?;
+    let sgx = adt.child_exact(armio, b"sgx\0").ok_or(EINVAL)?;
+    let compatible = adt.prop(sgx, "compatible").ok_or(EINVAL)?;
+    if compatible != b"gpu,t6034\0" {
+        return Err(EINVAL);
+    }
+    let base = adt.u64(chosen, "dram-base").ok_or(EINVAL)?;
+    let size = adt.u64(chosen, "dram-size").ok_or(EINVAL)?;
+    let end = base.checked_add(size).filter(|_| size != 0).ok_or(EINVAL)?;
+    let start = adt.u64(sgx, "gfx-handoff-base").ok_or(EINVAL)?;
+    let length = adt.u64(sgx, "gfx-handoff-size").ok_or(EINVAL)?;
+    if length != hw::HANDOFF_SIZE || start != out.handoff.start ||
+        start.checked_add(length) != Some(out.handoff.end) || start < base ||
+        out.handoff.end > end || !glue::handoff_nc(dev, start, length)
+    {
+        dev_err!(dev, "GPU no-map handoff ownership/mapping contract refused\n");
+        return Err(EINVAL);
+    }
+    Ok(())
 }

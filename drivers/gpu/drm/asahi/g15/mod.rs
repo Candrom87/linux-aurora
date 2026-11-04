@@ -125,6 +125,8 @@ pub(crate) struct Config {
     pub(crate) machine: &'static CStr,
     /// Where regions, segments and performance states come from, and how the GPU is powered.
     pub(crate) platform: hw::Platform,
+    /// Explicit handoff-page cache/ownership admission; table mappings are separate.
+    pub(crate) handoff_memory: hw::HandoffMemory,
     /// Initdata placement and sizes that differ between firmware builds.
     pub(crate) layout: &'static hw::Layout,
     /// Board images.

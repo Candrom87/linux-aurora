@@ -164,6 +164,7 @@ pub(crate) const CONFIG: Config = Config {
     // every T6031 board (in particular, not the 14-inch J514C).
     machine: kernel::c_str!("apple,j516c"),
     platform: super::Platform::DeviceTree,
+    handoff_memory: super::HandoffMemory::Region,
     layout: &LAYOUT,
     board: super::Board::DeviceTree(&super::super::board::record::J516C),
     // Four clusters: the saved-state pointers at +0x2980 of the preemption buffer (0xd80 plus
