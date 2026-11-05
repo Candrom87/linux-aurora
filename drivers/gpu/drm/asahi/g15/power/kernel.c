@@ -90,6 +90,54 @@ int asahi_g15c_source_packet(const struct g15c_board_source_input *in,
 	return ret;
 }
 
+int asahi_g15c_source_bundle(const struct g15c_board_source_input *in,
+			    u32 expected_chip, u32 selector, u32 revision,
+			    struct g15c_board_bundle *out)
+{
+	struct g15c_board_bundle *result;
+	int ret;
+
+	if (!in || !out || !expected_chip || in->chip_id != expected_chip)
+		return G15C_INVALID;
+	ret = context_allowed();
+	if (ret)
+		return ret;
+	result = kzalloc(sizeof(*result), GFP_KERNEL);
+	if (!result)
+		return -ENOMEM;
+	/* The caller's immutable spans are one source snapshot. Preserve the raw
+	 * native tables as well as the calculated packet; never reconstruct SRAM
+	 * from an OPP voltage/floor. Reimporting these bounded immutable buffers
+	 * is not another acquisition and stays entirely outside owned FP sections.
+	 */
+	ret = asahi_g15c_source_packet(in, expected_chip, &result->packet);
+	if (ret)
+		goto free;
+	ret = g15c_import_main(in->main, in->sram, in->gpu_num_perf_states,
+			       in->table_count, &result->tables.main);
+	if (ret)
+		goto free;
+	ret = g15c_import_aux(in->cs, 1, 16, &result->tables.cs);
+	if (ret)
+		goto free;
+	ret = g15c_import_aux(in->afr, 1, 8, &result->tables.afr);
+	if (ret)
+		goto free;
+	ret = g15c_import_shared_rail(&result->tables.cs, &result->tables.afr);
+	if (ret)
+		goto free;
+	/* The main cap is indexed in the SELECTED primary table. */
+	ret = g15c_native_caps(selector, revision,
+			      (result->packet.length - 64) / 12,
+			      result->tables.cs.count, result->tables.afr.count,
+			      result->tables.caps);
+	if (!ret)
+		*out = *result;
+free:
+	kfree_sensitive(result);
+	return ret;
+}
+
 int asahi_g15c_decode(const struct g15c_packed_coefficients *in,
 		     struct g15c_coefficients *out)
 {

@@ -2,7 +2,7 @@
 # Explicit-input arithmetic only. No T6034 match, caller or device operation.
 g15c-fp := g15c_23j220_power.o ieee_probes.o arm/pow.o arm/pow_log_data.o \
 	arm/exp_data.o arm/math_err.o single/powf.o single/powf_data.o single/exp2f_data.o
-g15c-int := kernel.o guard.o fpcr_read.o native_select.o native_import.o board_source.o
+g15c-int := kernel.o guard.o fpcr_read.o native_select.o native_import.o board_source.o native_caps.o
 g15c-flags := -I$(src)/g15/power/include -I$(src)/g15/power \
 	-fno-fast-math -ffp-contract=off -fno-math-errno -fno-builtin
 g15c-core-flags := -Dg15c_23j220_decode=g15c_core_decode \
