@@ -31,6 +31,8 @@ void asahi_g15_module_put(void);
 void asahi_g15_reprobe(void);
 void asahi_g15_report_loader_gpu(void);
 int asahi_g15_adt_phram(u64 *start, u64 *size);
+int asahi_g15_native_adt_phram(u64 *start, u64 *size);
+bool asahi_g15_ram_within(u64 start, u64 size);
 void __iomem *asahi_g15_ioremap_wc(u64 start, size_t size);
 bool asahi_g15_dma_coherent(struct device *dev);
 int asahi_g15_pmp_prepare(struct device *dev);
@@ -306,6 +308,60 @@ int asahi_g15_adt_phram(u64 *start, u64 *size)
 	*start = res.start;
 	*size = resource_size(&res);
 	return 0;
+}
+
+/*
+ * Native source acquisition requires one exact enabled, non-reusable ADT
+ * export, wholly reserved RAM. Validate before the Rust caller maps/copies it.
+ * No pointer or length is published on failure; no physical access occurs here.
+ */
+int asahi_g15_native_adt_phram(u64 *start, u64 *size)
+{
+	struct device_node *rmem, *child, *owner = NULL;
+	struct resource res;
+	u64 bytes, end;
+	unsigned int count = 0;
+	int ret = -EINVAL;
+
+	if (!start || !size)
+		return -EINVAL;
+	rmem = of_find_node_by_path("/reserved-memory");
+	if (!rmem || !of_device_is_available(rmem)) {
+		of_node_put(rmem);
+		return -ENODEV;
+	}
+	for_each_child_of_node(rmem, child) {
+		const void *label;
+		int length;
+
+		label = of_get_property(child, "label", &length);
+		if (!of_device_is_compatible(child, "phram") || !label ||
+		    length != 4 || memcmp(label, "adt", 4))
+			continue;
+		count++;
+		if (!owner)
+			owner = of_node_get(child);
+	}
+	of_node_put(rmem);
+	if (!count)
+		return -ENODEV;
+	if (count != 1 || !of_device_is_available(owner) ||
+	    of_property_read_bool(owner, "reusable") ||
+	    of_property_read_bool(owner, "no-map") ||
+	    of_get_address(owner, 1, NULL, NULL) ||
+	    of_address_to_resource(owner, 0, &res))
+		goto out;
+	bytes = resource_size(&res);
+	if (!bytes || bytes > 0x200000 || (res.start | bytes) & 0x3fff ||
+	    check_add_overflow((u64)res.start, bytes, &end) ||
+	    !asahi_g15_ram_within(res.start, bytes))
+		goto out;
+	*start = res.start;
+	*size = bytes;
+	ret = 0;
+out:
+	of_node_put(owner);
+	return ret;
 }
 
 /*

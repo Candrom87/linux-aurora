@@ -40,11 +40,37 @@ use super::board::record;
 use super::boot::glue;
 use super::hw;
 
+pub(crate) mod native;
+
+/// Owns the copied source for every native property view and the sensor rows.
+/// Construction copies the retained export once; no views borrow mapped RAM.
+pub(crate) struct NativeAdt {
+    data: KVVec<u8>,
+}
+
+impl NativeAdt {
+    fn read(dev: &device::Device, chip: u32) -> Result<Self> {
+        let (start, size) = glue::native_adt_phram()?;
+        let data = super::identity::copy_physical(start, usize::try_from(size)?)?;
+        native::parse(&data, chip).map_err(|why| {
+            dev_err!(dev, "native ADT refused: {}\n", why);
+            EINVAL
+        })?;
+        Ok(Self { data })
+    }
+
+    pub(crate) fn properties(&self, chip: u32) -> Result<native::Properties<'_>> {
+        native::parse(&self.data, chip).map_err(|_| EINVAL)
+    }
+}
+
 /// Number of ADT performance states of the board-image layout.
 pub(crate) const PERF_STATES: usize = 14;
 
 /// What the driver takes from the ADT.
 pub(crate) struct GpuAdt {
+    /// Native raw inputs remain owned until the GPU session releases the ADT.
+    pub(crate) native: Option<NativeAdt>,
     /// TTBAT page.
     pub(crate) ttbs: Range<u64>,
     /// Firmware kernel root and its tables.
@@ -321,6 +347,7 @@ fn parse(dev: &device::Device, adt: &Adt<'_>) -> Result<GpuAdt> {
     admit_regions(dev, &region, Some(dram_base..dram_base + dram_size), true)?;
     let [ttbs, tables, handoff, shared_l2, text, data] = region;
     let mut out = GpuAdt {
+        native: None,
         ttbs,
         tables,
         handoff,
@@ -399,7 +426,7 @@ fn admit_regions(
 }
 
 /// The GPU node's regions, segments and operating points (T6031).
-fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
+fn from_device_tree(dev: &device::Device, cfg: &super::Config) -> Result<GpuAdt> {
     const NAMES: [&CStr; 6] = [
         c_str!("ttbs"),
         c_str!("pagetables"),
@@ -430,6 +457,11 @@ fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
     admit_regions(dev, &region, None, true)?;
     let [ttbs, tables, handoff, shared_l2, text, data] = region;
     let mut out = GpuAdt {
+        native: if cfg.board == hw::Board::DeviceTreeNative {
+            Some(NativeAdt::read(dev, cfg.chip_id)?)
+        } else {
+            None
+        },
         ttbs,
         tables,
         handoff,
@@ -443,6 +475,10 @@ fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
         cluster_cells: 0,
         sensor_rows: [[0; 12]; record::SENSOR_ROW_COUNT],
     };
+    if let Some(native) = &out.native {
+        out.sensor_rows = native.properties(cfg.chip_id)?.sensor_rows;
+        return Ok(out);
+    }
     // Operating points: MHz, the highest cluster voltage of each and the clusters' voltages
     // (rounded up) for the hardware record; the SRAM voltage is not in the device tree, and
     // the powers are a boot-loader stand-in.
@@ -518,7 +554,7 @@ fn sensor_rows(dev: &device::Device) -> Result<[[u8; 12]; record::SENSOR_ROW_COU
 /// source the SoC configuration names.
 pub(crate) fn read(dev: &device::Device, cfg: &super::Config) -> Result<GpuAdt> {
     if cfg.platform == hw::Platform::DeviceTree {
-        return from_device_tree(dev);
+        return from_device_tree(dev, cfg);
     }
     let copy = copy()?;
     parse(dev, &Adt { data: &copy })
