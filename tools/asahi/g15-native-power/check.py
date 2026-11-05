@@ -95,7 +95,7 @@ def build(tmp, cc, mutant=None, ubsan=False):
         common += ['-fsanitize=undefined', '-fno-sanitize-recover=all']
     fp = ['g15c_23j220_power', 'ieee_probes', 'arm/pow', 'arm/pow_log_data',
           'arm/exp_data', 'arm/math_err', 'single/powf', 'single/powf_data', 'single/exp2f_data']
-    integer = ['kernel', 'guard', 'fpcr_read', 'native_select', 'native_import', 'board_source']
+    integer = ['kernel', 'guard', 'fpcr_read', 'native_select', 'native_import', 'board_source', 'native_caps']
     objects = []
     for name in fp + integer + ['fixture']:
         source = HERE / 'fixture.c' if name == 'fixture' else POWER / (name + '.c')

@@ -171,7 +171,9 @@ fn device_tree_board(
     adt: &GpuAdt,
     reference: &board::record::Reference,
 ) -> Result<(KVVec<u8>, KVVec<u8>, KVVec<u8>, u32)> {
-    let hw_img = board::hardware_record(dev, cfg, adt, reference)?;
+    // Native profiles must supply qualified native tables through a future
+    // same-boot acquisition path; the legacy OPP adapter cannot stand in.
+    let hw_img = board::hardware_record(dev, cfg, adt, reference, None)?;
     let (glob, pwr, max_power_mw) = board::device_tree(dev, &hw_img)?;
     let max_mhz = adt.perf_mhz.iter().copied().max().unwrap_or(0);
     if cfg.board == hw::Board::DeviceTreeNative {

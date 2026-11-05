@@ -182,6 +182,7 @@ pub(crate) struct IoSlot {
 }
 
 /// Everything the record is built from.
+#[derive(Copy, Clone)]
 pub(crate) struct Inputs<'a> {
     pub(crate) props: [u32; PROPS.len()],
     /// `apple,power-zones` cells (triples).
@@ -204,6 +205,43 @@ pub(crate) struct Inputs<'a> {
     /// The words neither the device tree nor the ADT carries.
     pub(crate) reference: &'a Reference,
 }
+
+/// Integer ABI matching the source importer; frequencies are still native Hz.
+/// These carry supplied data, not source/firmware/physical-state attestation.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct NativeMain {
+    pub(crate) count: u32,
+    pub(crate) tables: u32,
+    pub(crate) hz: [u32; STATES],
+    pub(crate) mv: [[u32; LANES]; STATES],
+    pub(crate) sram_mv: [[u32; LANES]; STATES],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct NativeAux {
+    pub(crate) count: u32,
+    pub(crate) channels: u32,
+    pub(crate) hz: [u32; STATES],
+    pub(crate) mv: [[u32; 2]; STATES],
+    pub(crate) sram_mv: [[u32; 2]; STATES],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub(crate) struct NativeTables {
+    pub(crate) main: NativeMain,
+    pub(crate) cs: NativeAux,
+    pub(crate) afr: NativeAux,
+    /// Source CoreConfig-dependent main/CS/AFR cap, separate from table count.
+    /// Main cap also has a separate runtime consumer, outside this record.
+    pub(crate) caps: [u32; 3],
+}
+
+const _: () = assert!(core::mem::size_of::<NativeMain>() == 1096);
+const _: () = assert!(core::mem::size_of::<NativeAux>() == 328);
+const _: () = assert!(core::mem::size_of::<NativeTables>() == 1764);
 
 /// Legacy reference values or explicit boot-loader model data. Chip/grouping
 /// evidence is independent of the numerical model and masks. The legacy
@@ -597,7 +635,7 @@ fn relative_powers(out: &mut [u8], powers: &RelativePowers, selected_count: usiz
     Ok(())
 }
 
-fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
+fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables, native: Option<&NativeTables>) -> R<()> {
     let p = &i.props;
     relative_powers(out, &i.reference.relative_power, t.len)?;
     put64(out, 0x0, 0x6f_0000_0000)?;
@@ -670,13 +708,15 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         put32(out, 0xf9c + 4 * k, ss.mhz)?;
         put32(out, 0x1350 + 4 * k, ss.mhz)?;
         for j in 0..LANES {
-            let v = lane(ps, j);
+            let v = native.map_or_else(|| lane(ps, j), |n| n.main.mv[t.primary[k] as usize][j]);
             put32(out, 0xb9c + 0x20 * k + 4 * j, v)?;
-            put32(out, 0xd9c + 0x20 * k + 4 * j, v.max(min_sram))?;
+            let sram = native.map_or(v.max(min_sram), |n| n.main.sram_mv[t.primary[k] as usize][j]);
+            put32(out, 0xd9c + 0x20 * k + 4 * j, sram)?;
         }
         for j in 0..ss.cells {
             put32(out, 0x1390 + 0x20 * k + 4 * j, ss.mv[j])?;
-            put32(out, 0x1590 + 0x20 * k + 4 * j, ss.mv[j].max(min_sram))?;
+            let sram = native.map_or(ss.mv[j].max(min_sram), |n| n.main.sram_mv[t.secondary[k] as usize][j]);
+            put32(out, 0x1590 + 0x20 * k + 4 * j, sram)?;
         }
         put32(out, 0xfdc + 4 * k, F_1_02)?;
         put32(out, 0x10dc + 4 * k, t.primary[k] as u32)?;
@@ -696,28 +736,29 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
     put32(out, 0x134c, t.top() as u32)?;
     // The CS and AFR tables: the top state twice, frequencies, voltages, SRAM voltages.
     let cs_sram = p[CSAFR_MIN_SRAM_UV] / 1000;
-    let mut aux = |base: usize, tab: &[Opp], n: usize| -> R<usize> {
+    let mut aux = |base: usize, tab: &[Opp], n: usize, imported: Option<(&NativeAux, u32)>| -> R<usize> {
         if tab.is_empty() || tab.len() > n {
             return Err("CS/AFR table empty or longer than its layout");
         }
         let top = (tab.len() - 1) as u32;
         put32(out, base, top)?;
-        put32(out, base + 4, top)?;
+        put32(out, base + 4, imported.map_or(top, |(_, cap)| cap))?;
         let (fr, vo, sr) = (base + 8, base + 8 + 4 * n, base + 8 + 12 * n);
         for (k, s) in tab.iter().enumerate() {
             put32(out, fr + 4 * k, s.mhz)?;
             for j in 0..s.cells.min(2) {
                 put32(out, vo + 8 * k + 4 * j, s.mv[j])?;
-                put32(out, sr + 8 * k + 4 * j, s.mv[j].max(cs_sram))?;
+                let sram = imported.map_or(s.mv[j].max(cs_sram), |(a, _)| a.sram_mv[k][j]);
+                put32(out, sr + 8 * k + 4 * j, sram)?;
             }
         }
         Ok(sr + 8 * n)
     };
-    let end = aux(0x115c, i.cs, CS_STATES)?;
+    let end = aux(0x115c, i.cs, CS_STATES, native.map(|n| (&n.cs, n.caps[1])))?;
     if end != 0x12a4 {
         return Err("CS table layout");
     }
-    let end = aux(0x12a4, i.afr, AFR_STATES)?;
+    let end = aux(0x12a4, i.afr, AFR_STATES, native.map(|n| (&n.afr, n.caps[2])))?;
     if end != 0x134c {
         return Err("AFR table layout");
     }
@@ -1016,13 +1057,66 @@ pub(crate) fn build(out: &mut [u8], i: &Inputs<'_>) -> R<()> {
     if !i.reference.approves_grouping(&t) {
         return Err("GPU performance-state grouping lacks matching board evidence");
     }
-    hwdata_b(out, i, &t)?;
+    hwdata_b(out, i, &t, None)?;
     hwdata_a(out, i, &t)?;
     for (k, row) in i.sensor_rows.iter().enumerate() {
         let at = SENSOR_ROWS + 12 * k;
         out.get_mut(at..at + 12)
             .ok_or("record too short")?
             .copy_from_slice(row);
+    }
+    tail(out)
+}
+
+/// Explicit native-record path. Performance rows come exclusively from `n`;
+/// `i.main/cs/afr` are not substituted for missing native data. Other metadata
+/// keeps the current record layout and remains separately caller-qualified.
+/// Like `build`, this is a scratch builder: publish only after complete success.
+pub(crate) fn build_native(out: &mut [u8], i: &Inputs<'_>, n: &NativeTables) -> R<()> {
+    let GroupingEvidence::Native { count, primary, secondary } = i.reference.grouping else {
+        return Err("native performance tables require native grouping");
+    };
+    if out.len() != SIZE || i.reference.chip_id != 0x6034 ||
+        !i.reference.matches_chip(0x6034) || !(2..=PERF_STATES as u32).contains(&n.main.count) ||
+        n.main.tables != CLUSTERS as u32 || n.cs.channels != 1 || n.afr.channels != 1 ||
+        !(2..=CS_STATES as u32).contains(&n.cs.count) ||
+        !(2..=AFR_STATES as u32).contains(&n.afr.count) ||
+        n.caps[0] >= count as u32 || n.caps[1] >= n.cs.count || n.caps[2] >= n.afr.count ||
+        primary[..count].iter().chain(&secondary[..count]).any(|&v| u32::from(v) >= n.main.count)
+    {
+        return Err("native performance table geometry, caps or selected indices");
+    }
+    for row in 0..n.cs.count.min(n.afr.count) as usize {
+        if n.cs.mv[row][0] != n.afr.mv[row][0] || n.cs.sram_mv[row][0] != n.afr.sram_mv[row][0] {
+            return Err("native CS/AFR shared rail differs");
+        }
+    }
+    let mut main = [Opp::default(); PERF_STATES];
+    let mut cs = [Opp::default(); CS_STATES];
+    let mut afr = [Opp::default(); AFR_STATES];
+    for (row, o) in main.iter_mut().take(n.main.count as usize).enumerate() {
+        o.mhz = n.main.hz[row] / 1_000_000;
+        o.mv.copy_from_slice(&n.main.mv[row][..CLUSTERS]);
+        o.cells = CLUSTERS;
+    }
+    for (raw, dest) in [(&n.cs, &mut cs[..]), (&n.afr, &mut afr[..])] {
+        for (row, o) in dest.iter_mut().take(raw.count as usize).enumerate() {
+            o.mhz = raw.hz[row] / 1_000_000;
+            o.mv[0] = raw.mv[row][0];
+            o.cells = 1;
+        }
+    }
+    let input = Inputs {
+        main: &main[..n.main.count as usize], cs: &cs[..n.cs.count as usize],
+        afr: &afr[..n.afr.count as usize], ..*i
+    };
+    let t = Tables { len: count, primary, secondary };
+    // Preserve repeats/order from both native maps; do not rerun voltage sorting.
+    out.fill(0);
+    hwdata_b(out, &input, &t, Some(n))?;
+    hwdata_a(out, &input, &t)?;
+    for (k, row) in input.sensor_rows.iter().enumerate() {
+        out[SENSOR_ROWS + 12 * k..SENSOR_ROWS + 12 * k + 12].copy_from_slice(row);
     }
     tail(out)
 }

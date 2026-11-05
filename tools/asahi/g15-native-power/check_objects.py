@@ -10,7 +10,7 @@ import subprocess
 
 FP = ['g15c_23j220_power', 'ieee_probes', 'arm/pow', 'arm/pow_log_data',
       'arm/exp_data', 'arm/math_err', 'single/powf', 'single/powf_data', 'single/exp2f_data']
-INTEGER = ['kernel', 'guard', 'fpcr_read', 'native_select', 'native_import', 'board_source']
+INTEGER = ['kernel', 'guard', 'fpcr_read', 'native_select', 'native_import', 'board_source', 'native_caps']
 
 
 def run(argv):
@@ -28,10 +28,10 @@ def main():
     a = p.parse_args()
     base = a.output / 'drivers/gpu/drm/asahi'
     symbols = run([a.nm, '--defined-only', base / 'asahi.o'])
-    apis = ['asahi_g15c_' + n for n in ('decode', 'board_packet', 'source_packet')]
+    apis = ['asahi_g15c_' + n for n in ('decode', 'board_packet', 'source_packet', 'source_bundle')]
     if a.disabled:
         assert all(n not in symbols for n in apis)
-        assert not re.search(r'\b(?:g15c_core_|g15c_import_|g15c_port_|g15c_arm_pow)', symbols)
+        assert not re.search(r'\b(?:g15c_core_|g15c_import_|g15c_port_|g15c_arm_pow|g15c_native_)', symbols)
         result = {'disabled': True, 'no_native_power_symbols_in_asahi': True}
     else:
         assert all(n in symbols for n in apis)
