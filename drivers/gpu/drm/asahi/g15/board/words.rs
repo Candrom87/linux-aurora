@@ -191,6 +191,49 @@ pub(crate) fn globals_with_cap(
     Ok(())
 }
 
+/// Initial native power-interface targets (full-scale fraction 0x10000) and
+/// the independently produced main cap. Frequencies are the serialized primary
+/// MHz rows, including state zero. Repeated/nonmonotonic maps are not sorted.
+/// This is an ordinary scratch-image patch, not a live power operation.
+pub(crate) fn native_globals_limits(
+    image: &mut [u8],
+    primary_mhz: &[u32],
+    min_duty: u32,
+    main_cap: u32,
+) -> Result<(), &'static str> {
+    // Refuse a minimum outside the constructed state domain rather than
+    // serialize a contradictory controller range.
+    if image.len() != GLOBALS_SIZE
+        || !(2..=16).contains(&primary_mhz.len())
+        || main_cap as usize >= primary_mhz.len()
+        || min_duty > (primary_mhz.len() as u32 - 1) * 100
+        || primary_mhz.iter().any(|&mhz| mhz > u32::MAX / 1_000_000)
+    {
+        return Err("native Globals limits: size, count, cap or imported frequency domain");
+    }
+    let top_mhz = primary_mhz[primary_mhz.len() - 1];
+    let mut target = 0;
+    // Source full-scale interpolation searches down past equal/higher rows.
+    // It therefore need not choose the final index when a map repeats rows.
+    for hi in (1..primary_mhz.len()).rev() {
+        let lo = hi - 1;
+        if primary_mhz[lo] < top_mhz {
+            let width = primary_mhz[hi]
+                .checked_sub(primary_mhz[lo])
+                .filter(|&v| v != 0)
+                .ok_or("native Globals limits: interpolation interval")?;
+            target = lo as u32 * 100 + (top_mhz - primary_mhz[lo]) * 100 / width;
+            break;
+        }
+    }
+    target = target.max(min_duty);
+    // All validation/calculation precedes the bounded writes: errors preserve
+    // the complete image. The cap is not duplicated into either target.
+    put32(image, globals::STATE_CAP[0], target)?;
+    put32(image, globals::STATE_CAP[1], target)?;
+    put32(image, globals::STATE_CAP[2], main_cap * 100)
+}
+
 /// Writes the J516C words into `image`, the expanded G15S Power template.
 pub(crate) fn power(
     image: &mut [u8],
@@ -454,6 +497,45 @@ mod tests {
         assert_eq!(PROPS.len(), w.values.len());
         assert_eq!(PROPS[PERIOD_MS], c"apple,power-sample-period");
         assert_eq!(PROPS[STANDBY_TIMER], c"apple,idleoff-standby-timer");
+    }
+
+    #[test]
+    fn native_initial_limits() {
+        for (mhz, minimum, cap, target) in [
+            (&[24, 100][..], 40, 1, 100),
+            (&[24, 100, 100, 100][..], 40, 2, 100),
+            (&[24, 200, 300, 100][..], 40, 2, 43),
+            (&[100, 100, 100][..], 40, 1, 40),
+            (&[0, 0, 0][..], 0, 0, 0),
+            (&[24, 100, 100, 100][..], 280, 1, 280),
+            (&[0, 4294][..], 40, 0, 100),
+            (&[0, 24, 100, 4294][..], 40, 1, 300),
+        ] {
+            let mut image = vec![0xa5; GLOBALS_SIZE];
+            native_globals_limits(&mut image, mhz, minimum, cap).unwrap();
+            let mut expected = vec![0xa5; GLOBALS_SIZE];
+            for (at, value) in [(0x7c, target), (0x80, target), (0x8c, cap * 100)] {
+                expected[at..at + 4].copy_from_slice(&u32::to_le_bytes(value));
+            }
+            assert_eq!(image, expected);
+        }
+        for (size, mhz, minimum, cap) in [
+            (GLOBALS_SIZE - 1, &[24, 100][..], 40, 1),
+            (GLOBALS_SIZE + 1, &[24, 100][..], 40, 1),
+            (GLOBALS_SIZE, &[][..], 0, 0),
+            (GLOBALS_SIZE, &[24][..], 0, 0),
+            (GLOBALS_SIZE, &[24; 17][..], 40, 1),
+            (GLOBALS_SIZE, &[24, 100][..], 101, 1),
+            (GLOBALS_SIZE, &[24, 100][..], 40, 2),
+            (GLOBALS_SIZE, &[24, 100][..], 40, u32::MAX),
+            (GLOBALS_SIZE, &[24, 4295][..], 40, 1),
+            (GLOBALS_SIZE, &[u32::MAX, 100][..], 40, 1),
+        ] {
+            let mut image = vec![0xa5; size];
+            let before = image.clone();
+            assert!(native_globals_limits(&mut image, mhz, minimum, cap).is_err());
+            assert_eq!(image, before);
+        }
     }
 
     #[test]

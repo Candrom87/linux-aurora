@@ -477,6 +477,26 @@ fn get32(b: &[u8], at: usize) -> R<u32> {
     Ok(u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
 }
 
+/// Patch initial native Globals from the completed hardware scratch record and
+/// the same bundle's independent main cap. This does not attest their origin.
+/// Every read and validation precedes the scratch-image writes.
+pub(crate) fn native_globals(image: &mut [u8], hardware: &[u8], native: &NativeTables) -> R<()> {
+    if hardware.len() != SIZE {
+        return Err("native Globals require a complete hardware record");
+    }
+    let count = get32(hardware, 0xb58)?
+        .checked_add(1)
+        .filter(|&n| (2..=16).contains(&n))
+        .ok_or("native Globals selected count")? as usize;
+    let mut primary = [0; 16];
+    for (row, mhz) in primary.iter_mut().take(count).enumerate() {
+        *mhz = get32(hardware, 0xb5c + 4 * row)?;
+    }
+    // Original gpu-pwr-min-duty-cycle, also used by setupConfig at +0xc30.
+    let min_duty = get32(hardware, a(0x854))?;
+    super::words::native_globals_limits(image, &primary[..count], min_duty, native.caps[0])
+}
+
 fn put32(b: &mut [u8], at: usize, v: u32) -> R<()> {
     b.get_mut(at..at + 4)
         .ok_or("record too short")?
