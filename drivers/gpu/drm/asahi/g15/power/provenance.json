@@ -1,0 +1,105 @@
+{
+  "m1n1_commit": "26fb710f12034a8b45480a7a34f95ec36bfd7535",
+  "exact_files": {
+    "g15c_23j220_power.c": {
+      "source": "src/gpu_power/g15c_23j220_power.c",
+      "sha256": "0ad865bcb07f3f6922aaebe210acd5a931b25c35019174e949ccd8fe308750fc"
+    },
+    "g15c_23j220_power.h": {
+      "source": "src/gpu_power/g15c_23j220_power.h",
+      "sha256": "6a5a6513d881d0293f8c70946ae7d5903768a0d1808359a13dcd62bba53111d6"
+    },
+    "guard.c": {
+      "source": "src/gpu_power/guard.c",
+      "sha256": "3228dd070211c12d918c717f16d5b70da1bcbcf1be60cdda93654de2055594b0"
+    },
+    "fpcr_read.c": {
+      "source": "src/gpu_power/fpcr_read.c",
+      "sha256": "844de354296ba12444b8a3da4d50c17ab0d16ddbe608b1a1fd68a5d1cd17fae4"
+    },
+    "ieee_probes.c": {
+      "source": "src/gpu_power/ieee_probes.c",
+      "sha256": "7e58ce4079c7d6af72c153500e80a0077ea92da948607efc74e9504798ab46e1"
+    },
+    "native_select.c": {
+      "source": "src/gpu_power/native_select.c",
+      "sha256": "c25b7c95f077993f5f59de5de5d22e53cd5ef1b9d2371ed3053c86b044e5ade6"
+    },
+    "native_select.h": {
+      "source": "src/gpu_power/native_select.h",
+      "sha256": "647cce370ab3faf1f9d504c2836e2640f1bfe3549d85ae1fe82cf925a815c906"
+    },
+    "arm/pow.c": {
+      "source": "src/gpu_power/arm/math/pow.c",
+      "sha256": "4497df6d64e0043c04df2cb308ae2918922b0f53e10f133006fba4e9eb5e8fb7"
+    },
+    "arm/pow_log_data.c": {
+      "source": "src/gpu_power/arm/math/pow_log_data.c",
+      "sha256": "d28818bd95355e6854766a3818a6ec0866f7afcef592fe1e836d05d3f465392e"
+    },
+    "arm/exp_data.c": {
+      "source": "src/gpu_power/arm/math/exp_data.c",
+      "sha256": "a5e84677e7693c7d22195f86faac5fdc6f92bff7ea2e54c0e7888203a78ffc24"
+    },
+    "arm/math_err.c": {
+      "source": "src/gpu_power/arm/math/math_err.c",
+      "sha256": "202a5f0b4983da16567bf707b8da02f9c1aa84bfaf1e9e2931009153b4a86676"
+    },
+    "arm/math_config.h": {
+      "source": "src/gpu_power/arm/math/math_config.h",
+      "sha256": "9a3ee029ba2b58444fafb51427bf0dc390d117f26115cd5a7033a5cc03042881"
+    },
+    "arm/pow_common.h": {
+      "source": "src/gpu_power/arm/math/pow_common.h",
+      "sha256": "367906e9face47b4ad4b3c08cae7d3d5b6737d9462881ce1a5fdbebd1f0e9325"
+    },
+    "arm/include/test_defs.h": {
+      "source": "src/gpu_power/arm/math/include/test_defs.h",
+      "sha256": "006c4acb9cb4dd604cd00c6a94004a52552d056a4bfca7f568566cbb9e83ad4d"
+    },
+    "single/powf.c": {
+      "source": "src/math/powf.c",
+      "sha256": "92d5232f887bf6010089808cc6d2e52ebdc27a66b4399cce6ad72fb1e83b85eb"
+    },
+    "single/powf_data.c": {
+      "source": "src/math/powf_data.c",
+      "sha256": "f85bbe5b9839b1ab80d31a6af54a1865bd60b7556568fac0ec7937765f7513bf"
+    },
+    "single/exp2f_data.c": {
+      "source": "src/math/exp2f_data.c",
+      "sha256": "4a2bbe151754b70daa061f9057e6b1c06f314de89f3aefaf4e64d9f3e5f9c45d"
+    },
+    "single/powf_data.h": {
+      "source": "src/math/powf_data.h",
+      "sha256": "b6d6afe031708527ba453c68431684a058eb4ad055e0aa7ce89c6daaa2f81d9a"
+    },
+    "single/exp2f_data.h": {
+      "source": "src/math/exp2f_data.h",
+      "sha256": "6546b35d62083aa6541413f04e132f46ce2b5108bd9781a1eedf167bfba63e64"
+    },
+    "LICENSE.m1n1": {
+      "source": "LICENSE",
+      "sha256": "11ca423a564b52d3b7f260398baa20d016c25ae180fbdd0067c27b7d1ed7b420"
+    },
+    "arm/LICENSE": {
+      "source": "src/gpu_power/arm/LICENSE",
+      "sha256": "650afbf29f214451e02241adc42534e82c9d6ae2b38e2444b92b5a1ffcaf9346"
+    },
+    "arm/provenance.json": {
+      "source": "src/gpu_power/arm/provenance.json",
+      "sha256": "7caf673bc21ecfdd7e077f965762ec0c0f1a11d2f7ab252cfb745f69acf40205"
+    },
+    "native_import.c": {
+      "source": "src/gpu_power/native_import.c",
+      "sha256": "3b022d225c49c9c7d7d63da40ebe1283311ad13f01a4974384c2a934d99d671c"
+    },
+    "native_import.h": {
+      "source": "src/gpu_power/native_import.h",
+      "sha256": "3e664cbec18ed66f5db84812a4f6e594f321fe8a060c1bd1c853da7dbe1908e7"
+    },
+    "board_source.c": {
+      "source": "src/gpu_power/board_source.c",
+      "sha256": "ee99d9e139d3637eefd9a72f2030ce40b89a00c9c53421463c34ba6672575eb9"
+    }
+  }
+}

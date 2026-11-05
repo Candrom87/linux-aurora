@@ -78,6 +78,16 @@ config DRM_ASAHI_G15
 	  be modules, so a modular display provider finishes initialization
 	  before the GPU module can probe through its direct helper import.
 
+config DRM_ASAHI_G15_NATIVE_POWER
+	bool "G15C explicit-input native board arithmetic"
+	depends on DRM_ASAHI_G15 && ARM64 && KERNEL_MODE_NEON
+	depends on ARCH_HAS_KERNEL_FPU_SUPPORT
+	default n
+	help
+	  Build the source-scoped 23J220 arithmetic and board-packet producer.
+	  CPU floating point is isolated behind a process-context ownership API.
+	  This does not enable any GPU, acquire device inputs, or qualify a board.
+
 config DRM_ASAHI_G15_BOARD_KUNIT_TEST
 	bool "Test G15 native board metadata with KUnit"
 	depends on KUNIT && DRM_ASAHI=y && DRM_ASAHI_G15 && OF_DYNAMIC
