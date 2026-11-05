@@ -29,7 +29,7 @@ int fixture_call(unsigned int flags, u64 fpcr, u64 fpsr, unsigned int decode,
 	/* Use readback rather than assuming optional control bits are implemented. */
 	fpcr = read_sysreg_s(SYS_FPCR); fpsr = read_sysreg_s(SYS_FPSR);
 	if (decode == 3)
-		ret = asahi_g15c_source_bundle(in, chip, 0x18, !!(flags & 1024), out);
+		ret = asahi_g15c_source_bundle(in, chip, out);
 	else if (decode == 2)
 		ret = asahi_g15c_source_packet(in, chip, out);
 	else

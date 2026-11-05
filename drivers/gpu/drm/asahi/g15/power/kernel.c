@@ -91,15 +91,19 @@ int asahi_g15c_source_packet(const struct g15c_board_source_input *in,
 }
 
 int asahi_g15c_source_bundle(const struct g15c_board_source_input *in,
-			    u32 expected_chip, u32 selector, u32 revision,
+			    u32 expected_chip,
 			    struct g15c_board_bundle *out)
 {
 	struct g15c_board_bundle *result;
+	struct g15c_cap_context context;
 	int ret;
 
 	if (!in || !out || !expected_chip || in->chip_id != expected_chip)
 		return G15C_INVALID;
 	ret = context_allowed();
+	if (ret)
+		return ret;
+	ret = g15c_native_context(in->identity, &context);
 	if (ret)
 		return ret;
 	result = kzalloc(sizeof(*result), GFP_KERNEL);
@@ -127,7 +131,7 @@ int asahi_g15c_source_bundle(const struct g15c_board_source_input *in,
 	if (ret)
 		goto free;
 	/* The main cap is indexed in the SELECTED primary table. */
-	ret = g15c_native_caps(selector, revision,
+	ret = g15c_native_caps(context.selector, context.revision,
 			      (result->packet.length - 64) / 12,
 			      result->tables.cs.count, result->tables.afr.count,
 			      result->tables.caps);
