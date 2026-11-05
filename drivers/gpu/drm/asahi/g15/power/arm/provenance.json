@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/ARM-software/optimized-routines",
+  "release": "v26.07",
+  "tag_object": "a0e9dfae9457d52aefde7463380962d89cf5e9e1",
+  "commit": "4be260a5117480382690c6d8c300bc784e927d76",
+  "license_choice": "MIT",
+  "files_unmodified": true,
+  "sha256": {
+    "LICENSE": "650afbf29f214451e02241adc42534e82c9d6ae2b38e2444b92b5a1ffcaf9346",
+    "math/exp_data.c": "a5e84677e7693c7d22195f86faac5fdc6f92bff7ea2e54c0e7888203a78ffc24",
+    "math/include/test_defs.h": "006c4acb9cb4dd604cd00c6a94004a52552d056a4bfca7f568566cbb9e83ad4d",
+    "math/math_config.h": "9a3ee029ba2b58444fafb51427bf0dc390d117f26115cd5a7033a5cc03042881",
+    "math/math_err.c": "202a5f0b4983da16567bf707b8da02f9c1aa84bfaf1e9e2931009153b4a86676",
+    "math/pow.c": "4497df6d64e0043c04df2cb308ae2918922b0f53e10f133006fba4e9eb5e8fb7",
+    "math/pow_common.h": "367906e9face47b4ad4b3c08cae7d3d5b6737d9462881ce1a5fdbebd1f0e9325",
+    "math/pow_log_data.c": "d28818bd95355e6854766a3818a6ec0866f7afcef592fe1e836d05d3f465392e"
+  }
+}

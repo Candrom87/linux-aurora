@@ -6,4 +6,5 @@ CFLAGS_g17/trace.o := -I$(src)/g17
 
 asahi-$(CONFIG_DRM_ASAHI_G15) += g15/glue.o
 asahi-$(CONFIG_DRM_ASAHI_G15) += g15/handoff_glue.o
+include $(src)/g15/power/Makefile
 asahi-$(CONFIG_DRM_ASAHI_UAT_ADOPTION) += g15/uat_glue.o
