@@ -25,6 +25,14 @@ struct g15c_board_bundle {
 	struct g15c_board_packet packet;
 	struct g15c_native_tables tables;
 };
+struct g15c_cap_context {
+	uint32_t selector, revision;
+};
+/* Source-scoped zero-initialized probe -> readChipInfo -> first-word copy.
+ * Derives the old CoreConfig fields from supplied identity words, not a new
+ * read or source attestation. Unknown revision encodings retain source zero.
+ */
+int g15c_native_context(const uint32_t identity[6], struct g15c_cap_context *);
 /* Explicit old-host CoreConfig selector/revision, not an asserted GPU ID word.
  * On selector0x18/revision1, the pinned source uses caps7/5/5. Other revisions
  * use each imported count minus one. Refuse caps outside supplied tables.
@@ -45,6 +53,5 @@ struct g15c_board_source_input;
 int asahi_g15c_source_packet(const struct g15c_board_source_input *, uint32_t,
 			    struct g15c_board_packet *);
 int asahi_g15c_source_bundle(const struct g15c_board_source_input *, uint32_t,
-			    uint32_t selector, uint32_t revision,
 			    struct g15c_board_bundle *);
 #endif
