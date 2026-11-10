@@ -19,12 +19,18 @@
 #define NE_VERSION 1
 #define NE_PROFILE_METADATA 1
 #define NE_PROFILE_FULL 2
+#define NE_PROFILE_BOOT_MEMORY 3
 #define NE_CAP_METADATA (1ULL << 0)
 #define NE_CAP_POSTEFI (1ULL << 1)
 #define NE_CAP_MCC (1ULL << 2)
 #define NE_CAP_DISPLAY (1ULL << 3)
 #define NE_CAP_GPU (1ULL << 4)
 #define NE_CAP_ORIGINAL_ARGS (1ULL << 5)
+#define NE_CAP_BOOT_MEMORY (1ULL << 6)
+#define NE_BOOT_MEMORY_CAPS (NE_CAP_METADATA | NE_CAP_BOOT_MEMORY)
+#define NE_BOOT_MEMORY_PROPERTY "asahi,t6034-boot-memory-audit"
+#define NE_BOOT_MEMORY_VERSION 1
+#define NE_BOOT_MEMORY_CELLS 10
 #define NE_FULL_CAPS (NE_CAP_METADATA | NE_CAP_POSTEFI | NE_CAP_MCC | \
                       NE_CAP_DISPLAY | NE_CAP_GPU | NE_CAP_ORIGINAL_ARGS)
 #define NE_FDT_MAX (2U * 1024U * 1024U)
@@ -72,13 +78,22 @@ static inline bool ne_code(uint64_t base, uint64_t bytes, uint64_t fn)
            bytes >= 4 && fn - base <= bytes - 4;
 }
 
+static inline uint64_t ne_profile_caps(uint32_t profile)
+{
+    switch (profile) {
+    case NE_PROFILE_METADATA: return NE_CAP_METADATA;
+    case NE_PROFILE_FULL: return NE_FULL_CAPS;
+    case NE_PROFILE_BOOT_MEMORY: return NE_BOOT_MEMORY_CAPS;
+    default: return 0;
+    }
+}
+
 static inline bool ne_launch_valid(const struct ne_launch *p)
 {
     return p && p->magic == NE_MAGIC && p->version == NE_VERSION &&
            p->bytes == sizeof(*p) && !p->reserved && p->parent_handle &&
            p->child_handle && p->caller_context &&
-           ((p->profile == NE_PROFILE_METADATA && p->required_caps == NE_CAP_METADATA) ||
-            (p->profile == NE_PROFILE_FULL && p->required_caps == NE_FULL_CAPS)) &&
+           p->required_caps && p->required_caps == ne_profile_caps(p->profile) &&
            p->child_bytes <= NE_IMAGE_MAX &&
            ne_range(p->child_base, p->child_bytes) &&
            ne_code(p->parent_base, p->parent_bytes, (uint64_t)p->continue_boot);
@@ -98,7 +113,7 @@ static inline bool ne_prepared_valid(const struct ne_launch *l, const struct ne_
     if ((uint64_t)p->adt < (uint64_t)p->fdt + p->fdt_capacity &&
         (uint64_t)p->fdt < (uint64_t)p->adt + p->adt_span)
         return false;
-    if (l->profile == NE_PROFILE_METADATA)
+    if (l->profile != NE_PROFILE_FULL)
         return !p->post_exit && !p->fail_stop;
     return ne_code(l->child_base, l->child_bytes, (uint64_t)p->post_exit) &&
            ne_code(l->child_base, l->child_bytes, (uint64_t)p->fail_stop);

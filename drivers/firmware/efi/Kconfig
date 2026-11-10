@@ -79,8 +79,17 @@ config M3MAX_POSTEFI_NATIVE
 	help
 	  Isolated J514M/T6034 development kernel only. Start a matching embedded
 	  native EFI application and require its complete native handoff contract
-	  before exiting boot services. Metadata-only applications refuse the boot.
-	  This does not modify the installed loader or another kernel's entry.
+	  before exiting boot services. Boot-memory observation can be selected
+	  below for a separate diagnostic build.
+
+config M3MAX_BOOT_MEMORY_AUDIT
+	bool "M3 Max early boot-memory audit"
+	depends on M3MAX_POSTEFI_NATIVE
+	default n
+	help
+	  Request the read-only EFI boot-memory profile from the embedded app.
+	  Carry its report into the running kernel under /chosen. Use the
+	  ordinary Linux EFI handoff without calling a native post-exit hook.
 
 config M3MAX_NATIVE_BUNDLE
 	string "Reviewed native EFI application path"

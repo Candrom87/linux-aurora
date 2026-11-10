@@ -364,6 +364,9 @@ struct m3max_boot_context {
 	bool continued;
 };
 
+static const u32 m3max_profile = IS_ENABLED(CONFIG_M3MAX_BOOT_MEMORY_AUDIT) ?
+				 NE_PROFILE_BOOT_MEMORY : NE_PROFILE_FULL;
+
 static void __noreturn m3max_stop(void)
 {
 	/* Boot services have ended. Returning into EFI or attempting cleanup is
@@ -378,13 +381,25 @@ static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *pr
 	unsigned long fdt_addr;
 	efi_status_t status;
 
-	if (!ne_prepared_valid(launch, prepared) || launch->profile != NE_PROFILE_FULL)
+	if (!ne_prepared_valid(launch, prepared) || launch->profile != m3max_profile)
 		return EFI_LOAD_ERROR;
 	context = launch->caller_context;
 	if (!context || context->continued || !context->cmdline || strstr(context->cmdline, "dtb=") ||
 	    fdt_check_header(prepared->fdt) ||
 	    fdt_totalsize(prepared->fdt) != prepared->fdt_bytes)
 		return EFI_LOAD_ERROR;
+	if (m3max_profile == NE_PROFILE_BOOT_MEMORY) {
+		const fdt32_t *report;
+		int chosen, len;
+
+		chosen = fdt_path_offset(prepared->fdt, "/chosen");
+		if (chosen < 0)
+			return EFI_LOAD_ERROR;
+		report = fdt_getprop(prepared->fdt, chosen, NE_BOOT_MEMORY_PROPERTY, &len);
+		if (!report || len != NE_BOOT_MEMORY_CELLS * sizeof(fdt64_t) ||
+		    fdt32_to_cpu(report[0]) || fdt32_to_cpu(report[1]) != NE_BOOT_MEMORY_VERSION)
+			return EFI_LOAD_ERROR;
+	}
 	context->continued = true;
 	status = allocate_new_fdt_and_exit_boot(launch->child_handle, context->image,
 					      &fdt_addr, context->cmdline,
@@ -396,8 +411,9 @@ static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *pr
 	 * Expand the FINAL tree, preserving kernel commandline and EFI map fields.
 	 * All storage already exists; no EFI or allocator call follows this point.
 	 */
-	if (fdt_open_into((void *)fdt_addr, (void *)fdt_addr, MAX_FDT_SIZE) ||
-	    prepared->post_exit(prepared, (void *)fdt_addr, MAX_FDT_SIZE) != EFI_SUCCESS) {
+	if (m3max_profile == NE_PROFILE_FULL &&
+	    (fdt_open_into((void *)fdt_addr, (void *)fdt_addr, MAX_FDT_SIZE) ||
+	     prepared->post_exit(prepared, (void *)fdt_addr, MAX_FDT_SIZE) != EFI_SUCCESS)) {
 		prepared->fail_stop(1);
 		m3max_stop();
 	}
@@ -416,7 +432,7 @@ efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
 		.image = image, .kernel_addr = kernel_addr, .cmdline = cmdline_ptr,
 	};
 
-	return m3max_native_start(handle, image, &context, m3max_continue, NE_PROFILE_FULL);
+	return m3max_native_start(handle, image, &context, m3max_continue, m3max_profile);
 #endif
 
 	status = allocate_new_fdt_and_exit_boot(handle, image, &fdt_addr,

@@ -21,11 +21,12 @@ efi_status_t m3max_native_start(void *handle, efi_loaded_image_t *parent,
 	efi_handle_t child_handle = NULL;
 	unsigned long bytes = m3max_native_bundle_end - m3max_native_bundle_start;
 	struct ne_launch launch = { 0 };
+	u64 caps = ne_profile_caps(profile);
 	efi_status_t status;
 
 	if (!parent || !ne_range((u64)parent->image_base, parent->image_size) ||
 	    !handle || !caller_context || !continuation || !bytes || bytes > NE_IMAGE_MAX ||
-	    (profile != NE_PROFILE_FULL && profile != NE_PROFILE_METADATA))
+	    !caps)
 		return EFI_INVALID_PARAMETER;
 	status = efi_bs_call(load_image, false, handle, NULL,
 			     (void *)m3max_native_bundle_start, bytes, &child_handle);
@@ -40,7 +41,7 @@ efi_status_t m3max_native_start(void *handle, efi_loaded_image_t *parent,
 	launch = (struct ne_launch){
 		.magic = NE_MAGIC, .version = NE_VERSION, .bytes = sizeof(launch),
 		.profile = profile,
-		.required_caps = profile == NE_PROFILE_FULL ? NE_FULL_CAPS : NE_CAP_METADATA,
+		.required_caps = caps,
 		.parent_handle = handle, .child_handle = child_handle,
 		.parent_base = (u64)parent->image_base, .parent_bytes = parent->image_size,
 		.child_base = (u64)child->image_base, .child_bytes = child->image_size,
