@@ -228,12 +228,13 @@ efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 					    unsigned long *new_fdt_addr,
 					    char *cmdline_ptr,
 					    const void *native_fdt,
-					    unsigned long native_fdt_size)
+					    unsigned long native_fdt_size,
+					    struct efi_boot_memmap **final_map)
 {
 	unsigned long desc_size;
 	u32 desc_ver;
 	efi_status_t status;
-	struct exit_boot_struct priv;
+	struct exit_boot_struct priv = { 0 };
 	unsigned long fdt_addr = 0;
 	unsigned long fdt_size = 0;
 	bool fdt_owned = false;
@@ -308,6 +309,8 @@ efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 	if (status == EFI_SUCCESS) {
 		efi_set_virtual_address_map_t *svam;
 
+		if (final_map)
+			*final_map = priv.boot_memmap;
 		if (efi_novamap)
 			return EFI_SUCCESS;
 
@@ -378,6 +381,7 @@ static void __noreturn m3max_stop(void)
 static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *prepared)
 {
 	struct m3max_boot_context *context;
+	struct efi_boot_memmap *final_map = NULL;
 	unsigned long fdt_addr;
 	efi_status_t status;
 
@@ -403,7 +407,7 @@ static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *pr
 	context->continued = true;
 	status = allocate_new_fdt_and_exit_boot(launch->child_handle, context->image,
 					      &fdt_addr, context->cmdline,
-					      prepared->fdt, prepared->fdt_bytes);
+					      prepared->fdt, prepared->fdt_bytes, &final_map);
 	if (status != EFI_SUCCESS)
 		return status;
 	/* Actual EFI exit AND the stub's final SetVirtualAddressMap call have
@@ -411,11 +415,24 @@ static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *pr
 	 * Expand the FINAL tree, preserving kernel commandline and EFI map fields.
 	 * All storage already exists; no EFI or allocator call follows this point.
 	 */
-	if (m3max_profile == NE_PROFILE_FULL &&
-	    (fdt_open_into((void *)fdt_addr, (void *)fdt_addr, MAX_FDT_SIZE) ||
-	     prepared->post_exit(prepared, (void *)fdt_addr, MAX_FDT_SIZE) != EFI_SUCCESS)) {
-		prepared->fail_stop(1);
-		m3max_stop();
+	if (m3max_profile == NE_PROFILE_FULL) {
+		struct ne_post_boot post = {
+			.fdt = (void *)fdt_addr, .fdt_capacity = MAX_FDT_SIZE,
+		};
+
+		if (final_map)
+			post.map = (struct ne_efi_memory_map){
+				.descriptors = final_map->map,
+				.bytes = final_map->map_size,
+				.descriptor_bytes = final_map->desc_size,
+				.descriptor_version = final_map->desc_ver,
+			};
+		if (!ne_post_boot_valid(&post) ||
+		    fdt_open_into(post.fdt, post.fdt, post.fdt_capacity) ||
+		    prepared->post_exit(prepared, &post) != EFI_SUCCESS) {
+			prepared->fail_stop(1);
+			m3max_stop();
+		}
 	}
 	efi_enter_kernel(context->kernel_addr, fdt_addr, fdt_totalsize((void *)fdt_addr));
 }
@@ -436,7 +453,7 @@ efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
 #endif
 
 	status = allocate_new_fdt_and_exit_boot(handle, image, &fdt_addr,
-						cmdline_ptr, NULL, 0);
+						cmdline_ptr, NULL, 0, NULL);
 	if (status != EFI_SUCCESS) {
 		efi_err("Failed to update FDT and exit boot services\n");
 		return status;

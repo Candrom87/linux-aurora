@@ -27,19 +27,23 @@
 #define NE_CAP_GPU (1ULL << 4)
 #define NE_CAP_ORIGINAL_ARGS (1ULL << 5)
 #define NE_CAP_BOOT_MEMORY (1ULL << 6)
+#define NE_CAP_FINAL_EFI_MAP (1ULL << 7)
 #define NE_BOOT_MEMORY_CAPS (NE_CAP_METADATA | NE_CAP_BOOT_MEMORY)
 #define NE_BOOT_MEMORY_PROPERTY "asahi,t6034-boot-memory-audit"
 #define NE_BOOT_MEMORY_VERSION 1
 #define NE_BOOT_MEMORY_CELLS 10
 #define NE_FULL_CAPS (NE_CAP_METADATA | NE_CAP_POSTEFI | NE_CAP_MCC | \
-                      NE_CAP_DISPLAY | NE_CAP_GPU | NE_CAP_ORIGINAL_ARGS)
+                      NE_CAP_DISPLAY | NE_CAP_GPU | NE_CAP_ORIGINAL_ARGS | NE_CAP_FINAL_EFI_MAP)
 #define NE_FDT_MAX (2U * 1024U * 1024U)
 #define NE_IMAGE_MAX (16U * 1024U * 1024U)
+#define NE_EFI_MAP_MAX (128U * 1024U)
+#define NE_EFI_MAP_MAX_DESCRIPTORS 1024U
 
 struct ne_launch;
 struct ne_prepared;
+struct ne_post_boot;
 typedef uint64_t (*ne_continue_fn)(struct ne_launch *, const struct ne_prepared *);
-typedef uint64_t (*ne_post_fn)(const struct ne_prepared *, void *, uint32_t);
+typedef uint64_t (*ne_post_fn)(const struct ne_prepared *, const struct ne_post_boot *);
 typedef void (*ne_stop_fn)(uint32_t);
 
 struct ne_launch {
@@ -67,9 +71,47 @@ struct ne_prepared {
     ne_stop_fn fail_stop;
 };
 
+/* Borrowed descriptor array for the successful ExitBootServices attempt.
+ * The kernel owns it and supplies the same array in the final FDT. A native
+ * callback can inspect it but must leave it intact for the incoming kernel. */
+struct ne_efi_memory_map {
+    const void *descriptors;
+    uint64_t bytes, descriptor_bytes;
+    uint32_t descriptor_version, reserved;
+};
+
+struct ne_post_boot {
+    void *fdt;
+    uint32_t fdt_capacity, reserved;
+    struct ne_efi_memory_map map;
+};
+
 static inline bool ne_range(uint64_t base, uint64_t bytes)
 {
     return base && bytes && base <= ~0ULL - bytes;
+}
+
+static inline bool ne_efi_map_valid(const struct ne_efi_memory_map *map)
+{
+    return map && !map->reserved && map->descriptor_version == 1 &&
+           !((uint64_t)map->descriptors & 7) && ne_range((uint64_t)map->descriptors, map->bytes) &&
+           map->bytes <= NE_EFI_MAP_MAX && map->descriptor_bytes >= 40 &&
+           map->descriptor_bytes <= 256 && !(map->descriptor_bytes & 7) &&
+           !(map->bytes % map->descriptor_bytes) &&
+           map->bytes / map->descriptor_bytes <= NE_EFI_MAP_MAX_DESCRIPTORS;
+}
+
+static inline bool ne_post_boot_valid(const struct ne_post_boot *post)
+{
+    uint64_t fdt, map;
+
+    if (!post || post->reserved || post->fdt_capacity > NE_FDT_MAX ||
+        !ne_range((uint64_t)post->fdt, post->fdt_capacity) || ((uint64_t)post->fdt & 7) ||
+        !ne_efi_map_valid(&post->map))
+        return false;
+    fdt = (uint64_t)post->fdt;
+    map = (uint64_t)post->map.descriptors;
+    return fdt + post->fdt_capacity <= map || map + post->map.bytes <= fdt;
 }
 
 static inline bool ne_code(uint64_t base, uint64_t bytes, uint64_t fn)
@@ -122,4 +164,5 @@ static inline bool ne_prepared_valid(const struct ne_launch *l, const struct ne_
 _Static_assert(sizeof(void *) == 8, "AArch64 EFI ABI only");
 _Static_assert(sizeof(struct ne_launch) == 96, "launch ABI layout");
 _Static_assert(sizeof(struct ne_prepared) == 88, "prepared ABI layout");
+_Static_assert(sizeof(struct ne_post_boot) == 48, "post-exit ABI layout");
 #endif
