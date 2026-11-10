@@ -12,6 +12,9 @@
 #include <asm/efi.h>
 
 #include "efistub.h"
+#ifdef CONFIG_M3MAX_POSTEFI_NATIVE
+#include "m3max-native.h"
+#endif
 
 #define EFI_DT_ADDR_CELLS_DEFAULT 2
 #define EFI_DT_SIZE_CELLS_DEFAULT 2
@@ -223,7 +226,9 @@ static
 efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 					    efi_loaded_image_t *image,
 					    unsigned long *new_fdt_addr,
-					    char *cmdline_ptr)
+					    char *cmdline_ptr,
+					    const void *native_fdt,
+					    unsigned long native_fdt_size)
 {
 	unsigned long desc_size;
 	u32 desc_ver;
@@ -231,6 +236,7 @@ efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 	struct exit_boot_struct priv;
 	unsigned long fdt_addr = 0;
 	unsigned long fdt_size = 0;
+	bool fdt_owned = false;
 
 	if (!efi_novamap) {
 		status = efi_alloc_virtmap(&priv.runtime_map, &desc_size,
@@ -246,12 +252,18 @@ efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 	 * 'dtb=' unless UEFI Secure Boot is disabled.  We assume that secure
 	 * boot is enabled if we can't determine its state.
 	 */
-	if (!IS_ENABLED(CONFIG_EFI_ARMSTUB_DTB_LOADER) ||
+	if (native_fdt) {
+		/* Borrowed pool allocation remains owned by the active native app.
+		 * Never FreePages it on an EFI failure or replace it with dtb=. */
+		fdt_addr = (unsigned long)native_fdt;
+		fdt_size = native_fdt_size;
+	} else if (!IS_ENABLED(CONFIG_EFI_ARMSTUB_DTB_LOADER) ||
 	    efi_get_secureboot() != efi_secureboot_mode_disabled) {
 		if (strstr(cmdline_ptr, "dtb="))
 			efi_err("Ignoring DTB from command line.\n");
 	} else {
 		status = efi_load_dtb(image, &fdt_addr, &fdt_size);
+		fdt_owned = status == EFI_SUCCESS && fdt_addr;
 
 		if (status != EFI_SUCCESS && status != EFI_NOT_READY) {
 			efi_err("Failed to load device tree!\n");
@@ -259,7 +271,9 @@ efi_status_t allocate_new_fdt_and_exit_boot(void *handle,
 		}
 	}
 
-	if (fdt_addr) {
+	if (native_fdt) {
+		efi_info("Using prepared native DTB\n");
+	} else if (fdt_addr) {
 		efi_info("Using DTB from command line\n");
 	} else {
 		/* Look for a device tree configuration table entry. */
@@ -334,12 +348,62 @@ fail_free_new_fdt:
 	efi_free(MAX_FDT_SIZE, *new_fdt_addr);
 
 fail:
-	efi_free(fdt_size, fdt_addr);
+	if (fdt_owned)
+		efi_free(fdt_size, fdt_addr);
 	if (!efi_novamap)
 		efi_bs_call(free_pool, priv.runtime_map);
 
 	return EFI_LOAD_ERROR;
 }
+
+#ifdef CONFIG_M3MAX_POSTEFI_NATIVE
+struct m3max_boot_context {
+	efi_loaded_image_t *image;
+	unsigned long kernel_addr;
+	char *cmdline;
+	bool continued;
+};
+
+static void __noreturn m3max_stop(void)
+{
+	/* Boot services have ended. Returning into EFI or attempting cleanup is
+	 * forbidden even if a broken native failure callback returns. */
+	for (;;)
+		asm volatile("msr daifset, #0xf; wfe" ::: "memory");
+}
+
+static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *prepared)
+{
+	struct m3max_boot_context *context;
+	unsigned long fdt_addr;
+	efi_status_t status;
+
+	if (!ne_prepared_valid(launch, prepared) || launch->profile != NE_PROFILE_FULL)
+		return EFI_LOAD_ERROR;
+	context = launch->caller_context;
+	if (!context || context->continued || !context->cmdline || strstr(context->cmdline, "dtb=") ||
+	    fdt_check_header(prepared->fdt) ||
+	    fdt_totalsize(prepared->fdt) != prepared->fdt_bytes)
+		return EFI_LOAD_ERROR;
+	context->continued = true;
+	status = allocate_new_fdt_and_exit_boot(launch->child_handle, context->image,
+					      &fdt_addr, context->cmdline,
+					      prepared->fdt, prepared->fdt_bytes);
+	if (status != EFI_SUCCESS)
+		return status;
+	/* Actual EFI exit AND the stub's final SetVirtualAddressMap call have
+	 * completed. No bool supplied by an EFI client admits native execution.
+	 * Expand the FINAL tree, preserving kernel commandline and EFI map fields.
+	 * All storage already exists; no EFI or allocator call follows this point.
+	 */
+	if (fdt_open_into((void *)fdt_addr, (void *)fdt_addr, MAX_FDT_SIZE) ||
+	    prepared->post_exit(prepared, (void *)fdt_addr, MAX_FDT_SIZE) != EFI_SUCCESS) {
+		prepared->fail_stop(1);
+		m3max_stop();
+	}
+	efi_enter_kernel(context->kernel_addr, fdt_addr, fdt_totalsize((void *)fdt_addr));
+}
+#endif
 
 efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
 			     unsigned long kernel_addr, char *cmdline_ptr)
@@ -347,8 +411,16 @@ efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
 	unsigned long fdt_addr;
 	efi_status_t status;
 
+#ifdef CONFIG_M3MAX_POSTEFI_NATIVE
+	struct m3max_boot_context context = {
+		.image = image, .kernel_addr = kernel_addr, .cmdline = cmdline_ptr,
+	};
+
+	return m3max_native_start(handle, image, &context, m3max_continue, NE_PROFILE_FULL);
+#endif
+
 	status = allocate_new_fdt_and_exit_boot(handle, image, &fdt_addr,
-						cmdline_ptr);
+						cmdline_ptr, NULL, 0);
 	if (status != EFI_SUCCESS) {
 		efi_err("Failed to update FDT and exit boot services\n");
 		return status;

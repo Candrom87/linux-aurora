@@ -72,6 +72,24 @@ config EFI_RUNTIME_WRAPPERS
 config EFI_GENERIC_STUB
 	bool
 
+config M3MAX_POSTEFI_NATIVE
+	bool "M3 Max experimental post-EFI native handoff"
+	depends on ARM64 && EFI_GENERIC_STUB && EFI_PARAMS_FROM_FDT
+	default n
+	help
+	  Isolated J514M/T6034 development kernel only. Start a matching embedded
+	  native EFI application and require its complete native handoff contract
+	  before exiting boot services. Metadata-only applications refuse the boot.
+	  This does not modify the installed loader or another kernel's entry.
+
+config M3MAX_NATIVE_BUNDLE
+	string "Reviewed native EFI application path"
+	depends on M3MAX_POSTEFI_NATIVE
+
+config M3MAX_NATIVE_BUNDLE_SHA256
+	string "Reviewed native EFI application SHA256"
+	depends on M3MAX_POSTEFI_NATIVE
+
 config EFI_ZBOOT
 	bool "Enable the generic EFI decompressor"
 	depends on EFI_GENERIC_STUB && !ARM
