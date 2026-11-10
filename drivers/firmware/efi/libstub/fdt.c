@@ -13,6 +13,7 @@
 
 #include "efistub.h"
 #ifdef CONFIG_M3MAX_POSTEFI_NATIVE
+#include <asm/sections.h>
 #include "m3max-native.h"
 #endif
 
@@ -418,6 +419,8 @@ static u64 m3max_continue(struct ne_launch *launch, const struct ne_prepared *pr
 	if (m3max_profile == NE_PROFILE_FULL) {
 		struct ne_post_boot post = {
 			.fdt = (void *)fdt_addr, .fdt_capacity = MAX_FDT_SIZE,
+			.kernel_base = context->kernel_addr, .kernel_bytes = _end - _text,
+			.kernel_page_bytes = PAGE_SIZE,
 		};
 
 		if (final_map)

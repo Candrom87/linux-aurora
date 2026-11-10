@@ -28,12 +28,14 @@
 #define NE_CAP_ORIGINAL_ARGS (1ULL << 5)
 #define NE_CAP_BOOT_MEMORY (1ULL << 6)
 #define NE_CAP_FINAL_EFI_MAP (1ULL << 7)
+#define NE_CAP_KERNEL_IMAGE_RANGE (1ULL << 8)
 #define NE_BOOT_MEMORY_CAPS (NE_CAP_METADATA | NE_CAP_BOOT_MEMORY)
 #define NE_BOOT_MEMORY_PROPERTY "asahi,t6034-boot-memory-audit"
 #define NE_BOOT_MEMORY_VERSION 1
 #define NE_BOOT_MEMORY_CELLS 10
 #define NE_FULL_CAPS (NE_CAP_METADATA | NE_CAP_POSTEFI | NE_CAP_MCC | \
-                      NE_CAP_DISPLAY | NE_CAP_GPU | NE_CAP_ORIGINAL_ARGS | NE_CAP_FINAL_EFI_MAP)
+                      NE_CAP_DISPLAY | NE_CAP_GPU | NE_CAP_ORIGINAL_ARGS | NE_CAP_FINAL_EFI_MAP | \
+                      NE_CAP_KERNEL_IMAGE_RANGE)
 #define NE_FDT_MAX (2U * 1024U * 1024U)
 #define NE_IMAGE_MAX (16U * 1024U * 1024U)
 #define NE_EFI_MAP_MAX (128U * 1024U)
@@ -82,8 +84,9 @@ struct ne_efi_memory_map {
 
 struct ne_post_boot {
     void *fdt;
-    uint32_t fdt_capacity, reserved;
+    uint32_t fdt_capacity, kernel_page_bytes;
     struct ne_efi_memory_map map;
+    uint64_t kernel_base, kernel_bytes;
 };
 
 static inline bool ne_range(uint64_t base, uint64_t bytes)
@@ -103,15 +106,20 @@ static inline bool ne_efi_map_valid(const struct ne_efi_memory_map *map)
 
 static inline bool ne_post_boot_valid(const struct ne_post_boot *post)
 {
-    uint64_t fdt, map;
+    uint64_t fdt, map, kernel;
 
-    if (!post || post->reserved || post->fdt_capacity > NE_FDT_MAX ||
+    if (!post || post->fdt_capacity > NE_FDT_MAX ||
         !ne_range((uint64_t)post->fdt, post->fdt_capacity) || ((uint64_t)post->fdt & 7) ||
-        !ne_efi_map_valid(&post->map))
+        !ne_efi_map_valid(&post->map) || !ne_range(post->kernel_base, post->kernel_bytes) ||
+        (post->kernel_page_bytes != 4096 && post->kernel_page_bytes != 16384 &&
+         post->kernel_page_bytes != 65536) || (post->kernel_base & (post->kernel_page_bytes - 1)))
         return false;
     fdt = (uint64_t)post->fdt;
     map = (uint64_t)post->map.descriptors;
-    return fdt + post->fdt_capacity <= map || map + post->map.bytes <= fdt;
+    kernel = post->kernel_base;
+    return (fdt + post->fdt_capacity <= map || map + post->map.bytes <= fdt) &&
+           (kernel + post->kernel_bytes <= fdt || fdt + post->fdt_capacity <= kernel) &&
+           (kernel + post->kernel_bytes <= map || map + post->map.bytes <= kernel);
 }
 
 static inline bool ne_code(uint64_t base, uint64_t bytes, uint64_t fn)
@@ -164,5 +172,5 @@ static inline bool ne_prepared_valid(const struct ne_launch *l, const struct ne_
 _Static_assert(sizeof(void *) == 8, "AArch64 EFI ABI only");
 _Static_assert(sizeof(struct ne_launch) == 96, "launch ABI layout");
 _Static_assert(sizeof(struct ne_prepared) == 88, "prepared ABI layout");
-_Static_assert(sizeof(struct ne_post_boot) == 48, "post-exit ABI layout");
+_Static_assert(sizeof(struct ne_post_boot) == 64, "post-exit ABI layout");
 #endif
