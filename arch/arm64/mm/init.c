@@ -18,6 +18,7 @@
 #include <linux/gfp.h>
 #include <linux/math.h>
 #include <linux/memblock.h>
+#include <linux/m3max-gpu-linear.h>
 #include <linux/sort.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
@@ -294,6 +295,7 @@ void __init arm64_memblock_init(void)
 		initrd_end = initrd_start + phys_initrd_size;
 	}
 
+	m3max_gpu_linear_init(memory_limit);
 	early_init_fdt_scan_reserved_mem();
 }
 

@@ -95,6 +95,19 @@ config M3MAX_NATIVE_BUNDLE
 	string "Reviewed native EFI application path"
 	depends on M3MAX_POSTEFI_NATIVE
 
+config M3MAX_GPU_LINEAR_MEMORY
+	bool "M3 Max post-EFI reserved GPU table memory"
+	depends on M3MAX_POSTEFI_NATIVE && !M3MAX_BOOT_MEMORY_AUDIT
+	depends on ARM64_4K_PAGES || ARM64_16K_PAGES
+	default n
+	help
+	  Isolated J514M/T6034 test kernels only. With the explicit early argument
+	  m3max_gpu_linear_memory=1, consume a versioned post-EFI producer handoff,
+	  validate its final map and six reserved-memory owners, then reserve and
+	  retain four UAT table ranges in the kernel linear map before paging.
+	  Never start GPU firmware or access its table/payload contents here.
+	  Invalid requested handoffs panic; the normal kernel is unaffected.
+
 config M3MAX_NATIVE_BUNDLE_SHA256
 	string "Reviewed native EFI application SHA256"
 	depends on M3MAX_POSTEFI_NATIVE

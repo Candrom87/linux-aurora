@@ -19,3 +19,4 @@ KASAN_SANITIZE_physaddr.o	+= n
 
 obj-$(CONFIG_KASAN)		+= kasan_init.o
 KASAN_SANITIZE_kasan_init.o	:= n
+obj-$(CONFIG_M3MAX_GPU_LINEAR_MEMORY) += m3max-gpu-linear.o
