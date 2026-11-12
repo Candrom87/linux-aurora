@@ -24,10 +24,11 @@ def main():
     p.add_argument('--objdump', default='llvm-objdump')
     p.add_argument('--nm', default='llvm-nm')
     p.add_argument('--receipt', type=Path)
+    p.add_argument('--linked-object', type=Path, help='actual vmlinux for a built-in driver; default: module asahi.o')
     p.add_argument('--disabled', action='store_true')
     a = p.parse_args()
     base = a.output / 'drivers/gpu/drm/asahi'
-    symbols = run([a.nm, '--defined-only', base / 'asahi.o'])
+    symbols = run([a.nm, '--defined-only', a.linked_object or base / 'asahi.o'])
     apis = ['asahi_g15c_' + n for n in ('decode', 'board_packet', 'source_packet', 'source_bundle')]
     if a.disabled:
         assert all(n not in symbols for n in apis)

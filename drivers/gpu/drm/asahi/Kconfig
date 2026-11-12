@@ -97,3 +97,14 @@ config DRM_ASAHI_G15_BOARD_KUNIT_TEST
 	  preflight using synthetic metadata in the marked QEMU handoff fixture.
 	  No GPU registers, firmware, power operations or workloads are used.
 	  The test skips on other machines. Say N outside metadata testing.
+
+config DRM_ASAHI_G15_POWER_KUNIT_TEST
+	bool "Test G15 native arithmetic ownership with KUnit"
+	depends on KUNIT && DRM_ASAHI=y && DRM_ASAHI_G15_NATIVE_POWER && OF
+	default n
+	help
+	  Run explicit-input arithmetic and SRAM/cap import through the actual
+	  Linux FPU ownership API in the marked QEMU metadata fixture. Checks
+	  atomic failures and interrupt/atomic/nested-context refusal as well.
+	  No GPU device, registers, firmware or power operation is used.
+	  The test skips on other machines. Say N outside CPU testing.
