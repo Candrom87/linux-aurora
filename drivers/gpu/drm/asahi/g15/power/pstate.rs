@@ -9,8 +9,8 @@
 //! - HardwareDataA (hardware record +0x4580): actual (+0x2c), target (+0x30) and current
 //!   (+0x38) state indices and the frequency in MHz as an IEEE single (+0x58).
 //!
-//! An index counts the firmware's DVFS states, 0 (off) to 8; its frequency is the state's
-//! table-A operating point ([`super::super::board`]), taken from the device tree.
+//! An index counts the selected firmware DVFS states. The legacy table has nine
+//! entries; a native table may use up to sixteen, read from its hardware record.
 //!
 //! [`write`] prints the `asahi-g15/pstate` file. Its first line is what a sampler reads:
 //! `pstate <index> freq_khz <kHz> source <stats|hwdata>`, from the newest power-state record
@@ -22,6 +22,9 @@ use core::fmt;
 
 /// DVFS states of the firmware tables (= `board::DVFS_STATES`).
 pub(crate) const STATES: usize = 9;
+pub(crate) const MAX_STATES: usize = 16;
+pub(crate) const TABLE_COUNT: usize = 0xb58;
+pub(crate) const TABLE_MHZ: usize = 0xb5c;
 
 /// HardwareDataA words.
 pub(crate) const HWDATA_A_ACTUAL: usize = 0x2c;
@@ -85,20 +88,57 @@ pub(crate) struct HwWords {
 /// The table-A frequency of each firmware state, kHz.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Table {
-    pub(crate) khz: [u32; STATES],
+    khz: [u32; MAX_STATES],
+    len: usize,
 }
 
 impl Table {
     /// From the table-A operating points in MHz.
     pub(crate) fn from_mhz(mhz: [u32; STATES]) -> Self {
-        Self {
-            khz: mhz.map(|m| m.saturating_mul(1000)),
+        let mut table = Self {
+            khz: [0; MAX_STATES],
+            len: STATES,
+        };
+        for (out, mhz) in table.khz.iter_mut().zip(mhz) {
+            *out = mhz.saturating_mul(1000);
         }
+        table
+    }
+
+    /// Bounded native table; reject conversion overflow instead of fabricating
+    /// a saturated frequency. No implicit nine-state selection or tail entries.
+    pub(crate) fn from_mhz_slice(mhz: &[u32]) -> Option<Self> {
+        if mhz.is_empty() || mhz.len() > MAX_STATES {
+            return None;
+        }
+        let mut table = Self {
+            khz: [0; MAX_STATES],
+            len: mhz.len(),
+        };
+        for (out, &mhz) in table.khz.iter_mut().zip(mhz) {
+            *out = mhz.checked_mul(1000)?;
+        }
+        Some(table)
+    }
+
+    /// Copy the admitted host-built record before it is made firmware-visible.
+    /// The runtime status path retains this value, not mutable firmware memory.
+    pub(crate) fn from_record(record: &[u8]) -> Option<Self> {
+        let read = |at: usize| Some(u32::from_le_bytes(record.get(at..at + 4)?.try_into().ok()?));
+        let top = read(TABLE_COUNT)? as usize;
+        if top == 0 || top >= MAX_STATES {
+            return None;
+        }
+        let mut mhz = [0; MAX_STATES];
+        for (n, value) in mhz[..top + 1].iter_mut().enumerate() {
+            *value = read(TABLE_MHZ + 4 * n)?;
+        }
+        Self::from_mhz_slice(&mhz[..top + 1])
     }
 
     /// The frequency of state `index`, kHz; `None` past the table.
     pub(crate) fn khz(&self, index: u32) -> Option<u32> {
-        self.khz.get(index as usize).copied()
+        self.khz[..self.len].get(index as usize).copied()
     }
 }
 
@@ -229,7 +269,7 @@ pub(crate) fn write(
         Khz(f32_mhz_to_khz(hw.freq_mhz))
     )?;
     f.write_str("table_khz:")?;
-    for khz in table.khz {
+    for khz in &table.khz[..table.len] {
         write!(f, " {}", khz)?;
     }
     writeln!(f)
@@ -238,6 +278,53 @@ pub(crate) fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_tables_keep_all_states_and_only_the_supplied_length() {
+        let mut mhz = [0; MAX_STATES];
+        for (n, value) in mhz.iter_mut().enumerate() {
+            *value = 100 * n as u32;
+        }
+        for len in 1..=MAX_STATES {
+            let table = Table::from_mhz_slice(&mhz[..len]).unwrap();
+            for (n, &value) in mhz[..len].iter().enumerate() {
+                assert_eq!(table.khz(n as u32), Some(1000 * value));
+            }
+            assert_eq!(table.khz(len as u32), None);
+            let mut out = String::new();
+            write(&mut out, &StatsSeen::default(), &HwWords::default(), &table).unwrap();
+            assert_eq!(
+                out.lines().last().unwrap().split_whitespace().count(),
+                len + 1
+            );
+        }
+        assert!(Table::from_mhz_slice(&[]).is_none());
+        assert!(Table::from_mhz_slice(&[0; MAX_STATES + 1]).is_none());
+        assert!(Table::from_mhz_slice(&[0, u32::MAX]).is_none());
+    }
+
+    #[test]
+    fn native_record_count_bounds_and_frequency_snapshot() {
+        let mut record = vec![0; TABLE_MHZ + 4 * MAX_STATES];
+        for top in 1..MAX_STATES {
+            record[TABLE_COUNT..TABLE_COUNT + 4].copy_from_slice(&(top as u32).to_le_bytes());
+            for n in 0..=top {
+                let at = TABLE_MHZ + 4 * n;
+                record[at..at + 4].copy_from_slice(&(100 * n as u32).to_le_bytes());
+            }
+            let copied = Table::from_record(&record).unwrap();
+            assert_eq!(copied.khz(top as u32), Some(100000 * top as u32));
+            assert_eq!(copied.khz(top as u32 + 1), None);
+            assert!(Table::from_record(&record[..TABLE_MHZ + 4 * top]).is_none());
+            // Changes to the source after construction cannot alter the view.
+            record[TABLE_MHZ + 4 * top..TABLE_MHZ + 4 * top + 4].fill(0);
+            assert_eq!(copied.khz(top as u32), Some(100000 * top as u32));
+        }
+        for top in [0, MAX_STATES as u32, u32::MAX] {
+            record[TABLE_COUNT..TABLE_COUNT + 4].copy_from_slice(&top.to_le_bytes());
+            assert!(Table::from_record(&record).is_none());
+        }
+    }
 
     // A made-up table, not any machine's.
     fn table() -> Table {

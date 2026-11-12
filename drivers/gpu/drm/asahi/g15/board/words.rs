@@ -38,6 +38,8 @@ pub(crate) const HWDATA_A_MAX_POWER: usize = 0x6a4;
 
 /// The top firmware DVFS state (= `board::DVFS_STATES - 1`).
 pub(crate) const TOP_STATE: u32 = 8;
+/// Capacity of the shared sixteen-entry firmware DVFS table.
+pub(crate) const MAX_TOP_STATE: u32 = 15;
 
 /// Globals words.
 mod globals {
@@ -161,13 +163,23 @@ pub(crate) fn globals(
     max_power_mw: u32,
     w: &PowerWords,
 ) -> Result<(), &'static str> {
+    globals_with_cap(image, max_power_mw, w, TOP_STATE)
+}
+
+/// Same Globals layout with the selected primary table's explicit top state.
+pub(crate) fn globals_with_cap(
+    image: &mut [u8], max_power_mw: u32, w: &PowerWords, top_state: u32,
+) -> Result<(), &'static str> {
+    if !(1..=MAX_TOP_STATE).contains(&top_state) {
+        return Err("Globals performance-state cap outside 1..16-state layout");
+    }
     if image.len() != GLOBALS_SIZE {
         return Err("Globals image of another size");
     }
     put32(image, globals::COMMAND_SUBMISSION, 1)?;
     put32(image, globals::MAX_POWER, max_power_mw)?;
     for at in globals::STATE_CAP {
-        put32(image, at, 100 * TOP_STATE)?;
+        put32(image, at, 100 * top_state)?;
     }
     put32(image, globals::STANDBY_TIMER, w.values[STANDBY_TIMER])?;
     put32(image, globals::UNK_980, 100)?;
@@ -473,6 +485,29 @@ mod tests {
         assert!(globals(&mut bad, 1, &w).is_err());
         let mut short = vec![0u8; GLOBALS_SIZE - 1];
         assert!(globals(&mut short, 1, &w).is_err());
+    }
+
+    #[test]
+    fn explicit_globals_cap_changes_only_the_three_state_caps() {
+        let w = j516c_words();
+        let mut original = vec![0u8; GLOBALS_SIZE];
+        original[0xdf9] = 3;
+        let mut legacy = original.clone();
+        globals(&mut legacy, 54321, &w).unwrap();
+        for cap in 1..=MAX_TOP_STATE {
+            let mut actual = original.clone();
+            globals_with_cap(&mut actual, 54321, &w, cap).unwrap();
+            let mut expected = legacy.clone();
+            for at in [0x7c, 0x80, 0x8c] {
+                expected[at..at + 4].copy_from_slice(&(100 * cap).to_le_bytes());
+            }
+            assert_eq!(actual, expected);
+        }
+        for cap in [0, MAX_TOP_STATE + 1, u32::MAX] {
+            let mut refused = original.clone();
+            assert!(globals_with_cap(&mut refused, 54321, &w, cap).is_err());
+            assert_eq!(refused, original);
+        }
     }
 
     #[test]

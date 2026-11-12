@@ -129,6 +129,8 @@ pub(crate) mod hwdata {
     /// Template checks: u32 1, and the number of DVFS states minus one.
     pub(crate) const CHECK_A38: usize = 0xa38;
     pub(crate) const DVFS_COUNT: usize = 0xb58;
+    /// Primary selected-table frequencies, MHz, sixteen u32 entries.
+    pub(crate) const DVFS_A_MHZ: usize = 0xb5c;
     pub(crate) const TTBAT: usize = 0xb44;
     pub(crate) const TA_ACTIVITY: usize = 0x1880;
     pub(crate) const FS_ACTIVITY: usize = 0x24c0;

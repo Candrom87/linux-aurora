@@ -60,3 +60,11 @@ controller words, masks and powers are invented. It never calls `Regs::new`,
 power helpers or firmware startup. Changesets and device/node references are
 released. Other machines skip the suite. This verifies metadata delivery and
 board-image construction, not this Mac's source provenance or safe power limits.
+
+The admitted record's selected count now supplies all three Globals performance
+caps. Native pstate reporting retains an owned copy of its complete selected
+primary frequency table before the record becomes firmware-visible; it does
+not use the fixed legacy nine-entry map or reread firmware-mutated tables.
+The legacy reference's bytes/status text stay unchanged. The kernel preflight
+test also checks every transported mask/ratio, the model word in all images,
+selected caps, selected top frequency and the six-channel T6034 mapping size.

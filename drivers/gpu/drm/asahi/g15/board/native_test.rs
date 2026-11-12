@@ -96,6 +96,37 @@ fn run(dev: &device::Device, chip: u32, full: bool, output: &mut [u32]) -> Resul
         cells[16 + 2 * count + n] = reference.relative_power.as_slice()[n];
     }
     let len = if let Some((hardware, globals, power, khz)) = images {
+        if word(&hardware, hwdata::DVFS_COUNT)? != count as u32 - 1
+            || word(&hardware, record::MAX_POWER)? != reference.max_power_mw
+            || word(&globals, 0x78)? != reference.max_power_mw
+            || word(&power, 0xd0)? != reference.max_power_mw
+        {
+            return Err(EINVAL);
+        }
+        for at in [0x7c, 0x80, 0x8c] {
+            if word(&globals, at)? != 100 * (count as u32 - 1) {
+                return Err(EINVAL);
+            }
+        }
+        for (offset, mask) in [
+            (0x8ac, reference.fast_die_mask),
+            (0x1490, reference.sochot_mask),
+            (0x24a8, reference.alarm_mask),
+        ] {
+            let at = record::HWDATA_A + offset;
+            if hardware.get(at..at + 16) != Some(mask.to_le_bytes().as_slice()) {
+                return Err(EINVAL);
+            }
+        }
+        for (n, &ratio) in reference.relative_power.as_slice().iter().enumerate() {
+            if word(&hardware, 0x105c + 4 * n)? != ratio {
+                return Err(EINVAL);
+            }
+        }
+        let table = super::super::power::pstate::Table::from_record(&hardware).ok_or(EINVAL)?;
+        if table.khz(count as u32 - 1) != Some(khz) || table.khz(count as u32).is_some() {
+            return Err(EINVAL);
+        }
         cells[len..len + 6].copy_from_slice(&[
             hardware.len() as u32,
             globals.len() as u32,

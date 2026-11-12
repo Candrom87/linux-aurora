@@ -34,6 +34,9 @@ static_assert!(idle::MIN_CONF == globals::IDLE_MIN_CONF);
 static_assert!(idle::DELAY == globals::IDLE_DELAY);
 
 static_assert!(pstate::STATES == board::DVFS_STATES);
+static_assert!(pstate::MAX_STATES == board::record::STATES);
+static_assert!(pstate::TABLE_COUNT == hwdata::DVFS_COUNT);
+static_assert!(pstate::TABLE_MHZ == hwdata::DVFS_A_MHZ);
 static_assert!(pstate::STATS_RECORD * pstate::STATS_SLOTS as usize == rings::STATS_RING_SIZE);
 static_assert!(pstate::STATS_SLOTS == super::fw::channels::RING_SLOTS);
 
@@ -61,7 +64,14 @@ impl Firmware {
             .channels
             .peek_stats()
             .unwrap_or(self.channels.stats_seen);
-        let table = pstate::Table::from_mhz(board::table_a_mhz(&self.session.adt));
+        let table = if self.cfg.board == super::hw::Board::DeviceTreeNative {
+            // Copy captured before the admitted record became firmware-visible.
+            // Do not substitute the fixed legacy map or reread mutable tables.
+            let Some(table) = self.init.native_pstate else { return Ok(()); };
+            table
+        } else {
+            pstate::Table::from_mhz(board::table_a_mhz(&self.session.adt))
+        };
         pstate::write(f, &seen, &hw, &table)
     }
 }

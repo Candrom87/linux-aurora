@@ -40,6 +40,7 @@ static_assert!(record::MAX_POWER == hwdata::HWDATA_A + hwdata::MAX_POWER_A);
 static_assert!(record::IOMAPS == hwdata::IOMAPS);
 static_assert!(record::PERF_STATES == adt::PERF_STATES);
 static_assert!(record::CLUSTERS == adt::CLUSTERS);
+static_assert!(words::MAX_TOP_STATE as usize + 1 == record::STATES);
 
 /// Expands a template into `out` and verifies its hash.
 pub(crate) fn expand(template: &Template, out: &mut [u8]) -> Result {
@@ -230,7 +231,14 @@ pub(crate) fn device_tree(
         dev_err!(dev, "board data template hash mismatch\n");
         return Err(EINVAL);
     }
-    words::globals(&mut glob, max_power_mw, &w)
+    let top = u32::from_le_bytes(hardware.get(hwdata::DVFS_COUNT..hwdata::DVFS_COUNT + 4)
+        .ok_or(EINVAL)?.try_into().map_err(|_| EINVAL)?);
+    let globals = if top == words::TOP_STATE {
+        words::globals(&mut glob, max_power_mw, &w)
+    } else {
+        words::globals_with_cap(&mut glob, max_power_mw, &w, top)
+    };
+    globals
         .and_then(|()| words::power(&mut pwr, max_power_mw, &w))
         .map_err(|why| {
             dev_err!(dev, "board data from the device tree: {}\n", why);

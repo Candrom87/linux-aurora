@@ -35,6 +35,8 @@ pub(crate) struct InitData {
     pub(crate) globals: Option<Arc<FwObject>>,
     pub(crate) control: Option<Arc<FwObject>>,
     pub(crate) hwdata: Option<Arc<FwObject>>,
+    /// Immutable admitted primary-table snapshot for native pstate reporting.
+    pub(crate) native_pstate: Option<super::power::pstate::Table>,
     /// Runtime (readiness) and Flags.
     pub(crate) runtime: Option<Arc<FwObject>>,
     pub(crate) flags: Option<Arc<FwObject>>,
@@ -50,6 +52,7 @@ impl InitData {
             globals: None,
             control: None,
             hwdata: None,
+            native_pstate: None,
             runtime: None,
             flags: None,
             c1: None,
@@ -172,7 +175,14 @@ fn device_tree_board(
 ) -> Result<(KVVec<u8>, KVVec<u8>, KVVec<u8>, u32)> {
     let hw_img = board::hardware_record(dev, cfg, adt, reference)?;
     let (glob, pwr, max_power_mw) = board::device_tree(dev, &hw_img)?;
-    let max_mhz = adt.perf_mhz.iter().copied().max().unwrap_or(0);
+    let max_mhz = if cfg.board == hw::Board::DeviceTreeNative {
+        // The selected primary top, not an unrelated raw ADT row or S8 map.
+        let top = get32(&hw_img, hwdata::DVFS_COUNT)? as usize;
+        if top == 0 || top >= board::record::STATES { return Err(EINVAL); }
+        get32(&hw_img, hwdata::DVFS_A_MHZ + 4 * top)?
+    } else {
+        adt.perf_mhz.iter().copied().max().unwrap_or(0)
+    };
     if cfg.board == hw::Board::DeviceTreeNative {
         // Do not log device-derived model words, masks or commitments. The
         // native model transport does not establish physical mW units.
@@ -273,6 +283,9 @@ pub(crate) fn build(
 
     // Board images, verified, then the owned replacements.
     let (mut hw_img, mut glob, pwr, max_khz) = board_images;
+    if cfg.board == hw::Board::DeviceTreeNative {
+        init.native_pstate = Some(super::power::pstate::Table::from_record(&hw_img).ok_or(EINVAL)?);
+    }
     if matches!(cfg.board, hw::Board::DeviceTree(_) | hw::Board::DeviceTreeNative) {
         // This timestamp belongs to initdata creation, not board-data preflight.
         let now: u64;
