@@ -99,7 +99,8 @@ static void run(struct kunit *test, const u32 *cells, size_t bytes,
 		 * driver binding, original GPU-node change or hardware operation. */
 		for_each_property_of_node(source, p) {
 			if (strncmp(p->name, "apple,", 6) || p->length <= 0 ||
-			    (size_t)p->length > sizeof(values) || p->length % 4)
+			    (size_t)p->length > sizeof(values) || p->length % 4 ||
+			    !strcmp(p->name, "apple,power-sample-period"))
 				continue;
 			n = p->length / 4;
 			KUNIT_ASSERT_EQ(test, of_property_read_u32_array(test->priv,
@@ -107,6 +108,11 @@ static void run(struct kunit *test, const u32 *cells, size_t bytes,
 			KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32_array(
 				&f->changes, f->node, p->name, values, n), 0);
 		}
+		/* The metadata fixture's one-unit time constants need a fictional
+		 * one-unit sample interval for complete controller construction.
+		 * A ten-unit interval correctly refuses the rounded zero filter. */
+		KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes,
+			f->node, "apple,power-sample-period", 1), 0);
 	}
 	if (cells) {
 		struct of_changeset_entry *entry;
