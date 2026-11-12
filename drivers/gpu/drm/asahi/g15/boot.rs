@@ -66,6 +66,7 @@ pub(crate) mod glue {
         pub(crate) fn asahi_g15_reprobe();
         pub(crate) fn asahi_g15_report_loader_gpu();
         fn asahi_g15_adt_phram(start: *mut u64, size: *mut u64) -> core::ffi::c_int;
+        fn asahi_g15_native_adt_phram(start: *mut u64, size: *mut u64) -> core::ffi::c_int;
         fn asahi_g15_ram_disjoint(start: u64, size: u64) -> bool;
         fn asahi_g15_ram_within(start: u64, size: u64) -> bool;
         fn asahi_g15_memory_mode(start: u64, size: u64) -> u32;
@@ -149,6 +150,14 @@ pub(crate) mod glue {
     pub(crate) fn ram_disjoint(start: u64, size: u64) -> bool {
         // SAFETY: Only queries the resource tree.
         unsafe { asahi_g15_ram_disjoint(start, size) }
+    }
+
+    /// Unique enabled, non-reusable, linear reserved-RAM ADT export metadata.
+    pub(crate) fn native_adt_phram() -> Result<(u64, u64)> {
+        let (mut start, mut size) = (0, 0);
+        // SAFETY: Both outputs are valid u64 pointers; helper queries metadata.
+        kernel::error::to_result(unsafe { asahi_g15_native_adt_phram(&mut start, &mut size) })?;
+        Ok((start, size))
     }
 
     /// Every page is valid System RAM and remains reserved from the allocator.
@@ -527,10 +536,15 @@ pub(crate) fn admit(
     }
     let adt = adt::read(dev, cfg)
         .inspect_err(|e| dev_err!(dev, "GPU regions not admitted: {:?}\n", e))?;
-    // T6034 requires complete identities; the older profiles keep their
-    // existing explicitly requested bring-up prefix policy.
-    identity::firmware(dev, &adt, cfg.firmware, cfg.chip_id != 0x6034)
-        .inspect_err(|e| dev_err!(dev, "loaded GFX TEXT identity mismatch: {:?}\n", e))?;
+    // Native production additionally requires an explicit image/board/model
+    // contract and the same immutable source/device. Never inherit prefix use.
+    let native_firmware = if cfg.board == hw::Board::DeviceTreeNative {
+        Some(identity::native_firmware(dev, &adt, cfg.firmware, cfg.chip_id)?)
+    } else {
+        identity::firmware(dev, &adt, cfg.firmware, cfg.chip_id != 0x6034)
+            .inspect_err(|e| dev_err!(dev, "loaded GFX TEXT identity mismatch: {:?}\n", e))?;
+        None
+    };
     dev_info!(dev, "M3: firmware identity accepted\n");
     if cfg.board == hw::Board::None {
         dev_err!(
@@ -549,10 +563,9 @@ pub(crate) fn admit(
         );
         return Err(EINVAL);
     }
-    // The native input owner/acquisition path must supply the complete computed
-    // bundle here. An OF packet alone cannot replace native SRAM/maps/caps.
-    // Until that provider is connected, T6034 refuses before Regs::new/hold_power.
-    let board_images = initdata::prepare_board(dev, cfg, &adt, None)?;
+    // The future power-owned acquisition must supply fresh words. This caller
+    // still supplies none; neither a short property nor a raw bundle suffices.
+    let board_images = initdata::prepare_board(dev, cfg, &adt, None, native_firmware.as_ref())?;
     let regs = regs::Regs::new(pdev)?;
     // Keep the GFX domain powered for the whole (retained) session.
     glue::hold_power(dev);

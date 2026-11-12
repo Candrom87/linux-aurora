@@ -43,3 +43,34 @@ int g15c_native_caps(uint32_t selector, uint32_t revision,
 		caps[i] = result[i];
 	return G15C_OK;
 }
+
+int g15c_native_thermal_masks(const uint32_t identity[6], const uint32_t enabled[4],
+			     uint32_t masks[3][4])
+{
+	/* Independently decoded 23J220 G15X constructor selections, not board
+	 * calibration or a fallback to a different machine's reference record.
+	 */
+	const uint32_t fast_die[4] = { 0, 0, 0x802a002b, 0x802a002b };
+	const uint32_t sochot[4] = { 0, 0, 0x802a002b, 0x802a002b };
+	struct g15c_cap_context context;
+	uint32_t result[3][4];
+
+	if (!identity || !enabled || !masks ||
+	    g15c_native_context(identity, &context) || context.selector != 0x18 ||
+	    !(enabled[0] | enabled[1] | enabled[2] | enabled[3]))
+		return G15C_INVALID;
+	/* Nonempty membership defeats the revision-one/empty special skip in
+	 * both constructors. Do not model that empty configuration as usable.
+	 */
+	for (uint32_t i = 0; i < 4; i++) {
+		if ((fast_die[i] & ~enabled[i]) || (sochot[i] & ~enabled[i]))
+			return G15C_INVALID;
+		result[0][i] = fast_die[i];
+		result[1][i] = sochot[i];
+		result[2][i] = enabled[i];
+	}
+	for (uint32_t role = 0; role < 3; role++)
+		for (uint32_t i = 0; i < 4; i++)
+			masks[role][i] = result[role][i];
+	return G15C_OK;
+}

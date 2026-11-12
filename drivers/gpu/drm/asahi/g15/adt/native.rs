@@ -20,7 +20,7 @@ pub(crate) struct Properties<'a> {
 
 // Exact complete names and duplicate refusal are separate from the legacy
 // parser's prefix matching. Call only after complete structural validation.
-fn property<'a>(adt: &Adt<'a>, node: usize, key: &[u8]) -> R<Option<&'a [u8]>> {
+pub(super) fn property<'a>(adt: &Adt<'a>, node: usize, key: &[u8]) -> R<Option<&'a [u8]>> {
     let count = le32(adt.data, node).ok_or("native ADT property count")?;
     let mut offset = node + 8;
     let mut found = None;
@@ -39,11 +39,11 @@ fn property<'a>(adt: &Adt<'a>, node: usize, key: &[u8]) -> R<Option<&'a [u8]>> {
     Ok(found)
 }
 
-fn required<'a>(adt: &Adt<'a>, node: usize, key: &[u8]) -> R<&'a [u8]> {
+pub(super) fn required<'a>(adt: &Adt<'a>, node: usize, key: &[u8]) -> R<&'a [u8]> {
     property(adt, node, key)?.ok_or("native ADT missing property")
 }
 
-fn child(adt: &Adt<'_>, node: usize, name: &[u8]) -> R<usize> {
+pub(super) fn child(adt: &Adt<'_>, node: usize, name: &[u8]) -> R<usize> {
     let props = le32(adt.data, node).ok_or("native ADT property count")?;
     let children = le32(adt.data, node + 4).ok_or("native ADT child count")?;
     let mut offset = node + 8;
@@ -64,7 +64,7 @@ fn child(adt: &Adt<'_>, node: usize, name: &[u8]) -> R<usize> {
     found.ok_or("native ADT missing exact child")
 }
 
-fn u32_property(adt: &Adt<'_>, node: usize, key: &[u8]) -> R<u32> {
+pub(super) fn u32_property(adt: &Adt<'_>, node: usize, key: &[u8]) -> R<u32> {
     let value = required(adt, node, key)?;
     if value.len() != 4 {
         return Err("native ADT scalar shape");

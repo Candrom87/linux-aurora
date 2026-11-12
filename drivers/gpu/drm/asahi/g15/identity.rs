@@ -14,8 +14,11 @@
 //! Bring-up escape hatch: `g15_accept_text_prefix=<hex>` admits an unpinned build whose digest
 //! starts with those 8 bytes (the full digest and marker offset are logged, so that the build
 //! can be pinned by the next kernel).
+//! That legacy escape never qualifies native board-data production: native
+//! admission requires an exact board-restricted image with an explicit matching
+//! producer contract and returns a separate sealed software-identity token.
 
-use kernel::{bindings, device, fmt, prelude::*};
+use kernel::{bindings, c_str, device, fmt, prelude::*};
 
 use super::boot::glue;
 use super::hw::FirmwareBuild;
@@ -37,8 +40,9 @@ impl fmt::Display for Hex<'_> {
     }
 }
 
-/// Copies `size` bytes at physical `phys`, a range outside the kernel's System RAM, into a
-/// private copy through a temporary write-back mapping.
+/// Copies a caller-qualified boot-memory range into owned bytes through a temporary
+/// write-back mapping. Callers establish the range's ownership and compatible memory
+/// type first; the native ADT path requires wholly reserved RAM.
 pub(crate) fn copy_physical(phys: u64, size: usize) -> Result<KVVec<u8>> {
     // SAFETY: memremap() of a boot-loader range creates a temporary mapping; it has no other
     // side effects.
@@ -70,15 +74,120 @@ impl From<&FirmwareBuild> for Measured {
 
 /// Identifies the loaded firmware build: the pinned build, or `None` for a build admitted by
 /// its digest prefix (`g15_accept_text_prefix`).
-/// With `allow_prefix` false, only a complete pinned identity may be admitted.
 pub(crate) fn firmware(
     dev: &device::Device,
     adt: &super::adt::GpuAdt,
     builds: &'static [FirmwareBuild],
     allow_prefix: bool,
 ) -> Result<Option<&'static FirmwareBuild>> {
-    let size = usize::try_from(adt.text.end - adt.text.start)?;
-    let data_size = adt.data.end - adt.data.start;
+    let prefix = if !allow_prefix || builds.is_empty() { 0 } else {
+        super::params::accept_text_prefix()
+    };
+    firmware_checked(dev, adt, builds, prefix, None)
+}
+
+/// An exact board-restricted image matched to the native board-data contract.
+/// Binds that software to the original device allocation and copied source,
+/// not GPU state, power, fresh register words or register/memory handoff.
+/// Production construction is restricted to native_firmware. The KUnit-only
+/// synthetic constructor below is not firmware measurement or admission.
+pub(crate) struct NativeFirmware {
+    build: &'static FirmwareBuild,
+    source: super::adt::source::Source,
+    dev: kernel::sync::aref::ARef<device::Device>,
+}
+
+/// Synthetic software-context service for the marked metadata fixture only.
+/// No loaded firmware is measured or admitted, and this descriptor is absent
+/// from every production profile. Used to test source/device binding and the
+/// typed producer/image path with invented input data.
+#[cfg(CONFIG_DRM_ASAHI_G15_BOARD_KUNIT_TEST)]
+pub(crate) fn fixture_native_firmware(
+    dev: &device::Device, adt: &super::adt::GpuAdt,
+) -> Result<NativeFirmware> {
+    static BUILD: FirmwareBuild = FirmwareBuild {
+        name: "Synthetic KUnit context; no firmware measurement",
+        machine: Some(kernel::c_str!("apple,j514m")),
+        native_board_contract: Some(super::board::record::NATIVE_CONTRACT),
+        text_size: 0x4000, data_size: 0x4000, marker: 32, text_sha256: [0; 32],
+    };
+    let snapshot = adt.native.as_ref().ok_or(EINVAL)?;
+    snapshot.check_firmware_regions(0x6034, &adt.text, &adt.data)?;
+    Ok(NativeFirmware { build: &BUILD, source: snapshot.source_identity().clone(), dev: dev.into() })
+}
+
+impl NativeFirmware {
+    pub(crate) fn build(&self) -> &'static FirmwareBuild {
+        self.build
+    }
+
+    pub(crate) fn matches_source(&self, snapshot: &super::adt::NativeAdt) -> bool {
+        self.source.same(snapshot.source_identity())
+    }
+
+    /// Pins/identifies the original allocation and copied source, not the
+    /// current binding generation, probe lock, power or physical handoff.
+    pub(crate) fn matches(&self, dev: &device::Device, snapshot: &super::adt::NativeAdt) -> bool {
+        self.dev.as_raw() == dev.as_raw() && self.matches_source(snapshot)
+    }
+}
+
+/// Native board production must never inherit the legacy digest-prefix escape
+/// or silently use a pinned image qualified only for legacy templates/records.
+pub(crate) fn native_firmware(
+    dev: &device::Device,
+    adt: &super::adt::GpuAdt,
+    builds: &'static [FirmwareBuild],
+    chip: u32,
+) -> Result<NativeFirmware> {
+    if chip != 0x6034 || !glue::machine(c_str!("apple,j514m")) {
+        return Err(ENODEV);
+    }
+    let snapshot = adt.native.as_ref().ok_or(ENODEV)?;
+    snapshot.check_firmware_regions(chip, &adt.text, &adt.data)?;
+    let build = firmware_checked(
+        dev,
+        adt,
+        builds,
+        0,
+        Some(super::board::record::NATIVE_CONTRACT),
+    )?
+    .ok_or(ENODEV)?;
+    Ok(NativeFirmware { build, source: snapshot.source_identity().clone(), dev: dev.into() })
+}
+
+fn firmware_checked(
+    dev: &device::Device,
+    adt: &super::adt::GpuAdt,
+    builds: &'static [FirmwareBuild],
+    accept_prefix: u64,
+    native_contract: Option<u32>,
+) -> Result<Option<&'static FirmwareBuild>> {
+    let text_size = adt.text.end.checked_sub(adt.text.start)
+        .filter(|&size| size != 0).ok_or(EINVAL)?;
+    let data_size = adt.data.end.checked_sub(adt.data.start)
+        .filter(|&size| size != 0).ok_or(EINVAL)?;
+    let qualifies = |b: &FirmwareBuild| {
+        b.machine.map_or(true, glue::machine)
+            && native_contract.map_or(true, |contract| {
+                b.machine == Some(c_str!("apple,j514m"))
+                    && b.native_board_contract == Some(contract)
+            })
+    };
+    // Native admission has no prefix escape: without an eligible descriptor
+    // of this geometry there is no possible success after a TEXT copy. Check
+    // that before mapping boot memory. A candidate still needs the complete
+    // measured identity below; this is not an image or memory qualification.
+    // Legacy diagnostics keep measuring unknown geometry for their prefix path.
+    if native_contract.is_some() && !builds.iter().any(|b| {
+        qualifies(b) && b.text_size == text_size && b.data_size == data_size
+            && b.marker % 8 == 0 && u64::from(b.marker) + 16 <= text_size
+    }) {
+        dev_err!(dev, "no native GPU firmware descriptor for board/contract and TEXT {:#x} DATA {:#x}\n",
+                 text_size, data_size);
+        return Err(EINVAL);
+    }
+    let size = usize::try_from(text_size)?;
     let mut copy = copy_physical(adt.text.start, size)?;
     let at = lookup::marker(&copy).map_err(|found| {
         dev_err!(
@@ -96,16 +205,7 @@ pub(crate) fn firmware(
         sha256: glue::sha256(&copy),
     };
     // A qualified build pins only on the machine it names.
-    let qualified = builds
-        .iter()
-        .map(|b| (Measured::from(b), b.machine.map_or(true, glue::machine)));
-    // A profile may require exact identities even after its first build is
-    // pinned. Empty profiles remain measurement-only in either policy.
-    let accept_prefix = if !allow_prefix || builds.is_empty() {
-        0
-    } else {
-        super::params::accept_text_prefix()
-    };
+    let qualified = builds.iter().map(|b| (Measured::from(b), qualifies(b)));
     match lookup::verdict(&m, qualified, accept_prefix) {
         Verdict::Pinned(i) => {
             let build = builds.get(i).ok_or(EINVAL)?;

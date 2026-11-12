@@ -33,6 +33,12 @@ struct g15c_cap_context {
  * read or source attestation. Unknown revision encodings retain source zero.
  */
 int g15c_native_context(const uint32_t identity[6], struct g15c_cap_context *);
+/* Nonempty enabled membership on the reviewed selector0x18 path. Each
+ * hotspot selection is independent; the third output preserves membership.
+ * MSB-first transport cells. No acquisition/attestation; refusal is atomic.
+ */
+int g15c_native_thermal_masks(const uint32_t identity[6], const uint32_t enabled[4],
+			     uint32_t masks[3][4]);
 /* Explicit old-host CoreConfig selector/revision, not an asserted GPU ID word.
  * On selector0x18/revision1, the pinned source uses caps7/5/5. Other revisions
  * use each imported count minus one. Refuse caps outside supplied tables.

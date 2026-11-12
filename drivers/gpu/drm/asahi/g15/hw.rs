@@ -25,6 +25,8 @@ pub(crate) struct FirmwareBuild {
     pub(crate) name: &'static str,
     /// Optional board restriction in addition to the SoC admission.
     pub(crate) machine: Option<&'static kernel::str::CStr>,
+    /// Explicit producer/image/board pairing; None does not qualify native data.
+    pub(crate) native_board_contract: Option<u32>,
     pub(crate) text_size: u64,
     pub(crate) data_size: u64,
     /// Offset of the GKTS marker in TEXT; the 8 entropy bytes after it are zeroed before hashing.
@@ -55,10 +57,10 @@ pub(crate) enum Board {
     /// builder refuses stops admission, before any firmware is touched.
     #[cfg(CONFIG_DRM_ASAHI_G15)]
     DeviceTree(&'static super::board::record::Reference),
-    /// Explicit boot-loader model cells, checked against this chip and the
-    /// record builder's primary/secondary grouping before Regs::new/hold_power
-    /// and firmware startup, not before every platform supplier's PM activity.
-    /// T6034 requires this source; absence or invalid data refuses preflight.
+    /// One immutable original source, an exact source/device-bound native
+    /// firmware contract and supplied register words produce the native bundle
+    /// before Regs::new/hold_power. This does not authorize the word acquisition
+    /// or describe every earlier platform/supplier PM operation.
     #[cfg(CONFIG_DRM_ASAHI_G15)]
     DeviceTreeNative,
     /// No board data: admission refuses the SoC before anything firmware-visible.
@@ -144,6 +146,7 @@ pub(crate) mod t6030 {
           FirmwareBuild {
             name: "macOS 14.7-14.8.x stub firmware (iBoot-10151.140.19.700.2)",
             machine: None,
+            native_board_contract: None,
             text_size: 0x5c000,
             data_size: 0x114000,
             marker: 0x58e88,
@@ -160,6 +163,7 @@ pub(crate) mod t6030 {
           FirmwareBuild {
             name: "J516S B0 RTKit-2419.140.12 (maintained 14.x handoff)",
             machine: Some(kernel::c_str!("apple,j516s")),
+            native_board_contract: None,
             text_size: 0x5c000,
             data_size: 0x114000,
             marker: 0x58e88,
@@ -175,6 +179,7 @@ pub(crate) mod t6030 {
           FirmwareBuild {
             name: "J514S B0 RTKit-2419.140.12 (maintained 14.x handoff)",
             machine: Some(kernel::c_str!("apple,j514s")),
+            native_board_contract: None,
             text_size: 0x5c000,
             data_size: 0x114000,
             marker: 0x58e88,

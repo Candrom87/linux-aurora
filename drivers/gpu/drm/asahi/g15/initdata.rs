@@ -218,9 +218,12 @@ pub(crate) fn prepare_board(
     dev: &device::Device,
     cfg: &Config,
     adt: &GpuAdt,
-    native: Option<&board::native::Bundle>,
+    native_words: Option<&board::native::Words>,
+    native_firmware: Option<&super::identity::NativeFirmware>,
 ) -> Result<BoardImages> {
-    if native.is_some() && cfg.board != hw::Board::DeviceTreeNative {
+    if (native_words.is_some() || native_firmware.is_some())
+        && cfg.board != hw::Board::DeviceTreeNative
+    {
         return Err(EINVAL);
     }
     match cfg.board {
@@ -228,10 +231,16 @@ pub(crate) fn prepare_board(
         hw::Board::DeviceTree(reference) => device_tree_board(dev, cfg, adt,
             &board::native::Source::Legacy(reference)),
         hw::Board::DeviceTreeNative => {
-            let bundle = native.ok_or(EINVAL).inspect_err(|_| {
-                dev_err!(dev, "native board requires an owned computed table bundle\n");
+            let words = native_words.ok_or(EINVAL).inspect_err(|_| {
+                dev_err!(dev, "native board requires qualified source words\n");
             })?;
-            let bound = board::native::Bound::new(bundle, cfg.chip_id).map_err(|why| {
+            let snapshot = adt.native.as_ref().ok_or(EINVAL)?;
+            let firmware = native_firmware.ok_or(EINVAL)?;
+            if !firmware.matches(dev, snapshot) {
+                return Err(EINVAL);
+            }
+            let bundle = board::native_bundle(snapshot, firmware, words, cfg.chip_id)?;
+            let bound = board::native::Bound::new(&bundle, cfg.chip_id).map_err(|why| {
                 dev_err!(dev, "native board bundle: {}\n", why);
                 EINVAL
             })?;
@@ -239,6 +248,16 @@ pub(crate) fn prepare_board(
         }
         hw::Board::None => Err(ENODEV),
     }
+}
+
+/// Raw bundle layout fixture only. The production entry above requires the
+/// immutable source/device/firmware association and computes its own bundle.
+#[cfg(CONFIG_DRM_ASAHI_G15_BOARD_KUNIT_TEST)]
+pub(crate) fn fixture_bundle_board(
+    dev: &device::Device, cfg: &Config, adt: &GpuAdt, bundle: &board::native::Bundle,
+) -> Result<BoardImages> {
+    let bound = board::native::Bound::new(bundle, cfg.chip_id).map_err(|_| EINVAL)?;
+    device_tree_board(dev, cfg, adt, &board::native::Source::Native(bound))
 }
 
 /// Builds the initdata graph. Returns it with its channels and the top DVFS frequency in kHz.

@@ -134,6 +134,44 @@ pub(crate) fn native_reference(dev: &device::Device, chip: u32) -> Result<record
     })
 }
 
+/// Compute one heap-owned native bundle from one immutable ADT owner, the
+/// matched producer contract and explicit integer register words. Membership
+/// and thermal masks are derived here. Does not acquire/attest those words.
+pub(crate) fn native_bundle(
+    snapshot: &super::adt::NativeAdt,
+    firmware: &super::identity::NativeFirmware,
+    words: &native::Words,
+    chip: u32,
+) -> Result<KBox<native::Bundle>> {
+    #[cfg(CONFIG_DRM_ASAHI_G15_NATIVE_POWER)]
+    {
+        extern "C" {
+            fn asahi_g15c_source_bundle(
+                input: *const core::ffi::c_void, chip: u32, output: *mut native::Bundle,
+            ) -> core::ffi::c_int;
+        }
+        let input = native::Input::from_native(snapshot, firmware, words, chip)
+            .map_err(|_| EINVAL)?;
+        let mut output = KBox::<native::Bundle>::new_uninit(GFP_KERNEL)?;
+        // SAFETY: repr(C) input owns its integers and borrows live immutable
+        // ADT spans. The disjoint, aligned output allocation holds the complete
+        // C bundle. The C entry has integer ABI and owns its kernel FPU scope.
+        let ret = unsafe {
+            asahi_g15c_source_bundle((&input as *const native::Input<'_>).cast(), chip, output.as_mut_ptr())
+        };
+        if ret != 0 {
+            return Err(Error::from_errno(native::linux_status(ret)));
+        }
+        // SAFETY: Success initializes every field of this all-integer C output.
+        return Ok(unsafe { output.assume_init() });
+    }
+    #[cfg(not(CONFIG_DRM_ASAHI_G15_NATIVE_POWER))]
+    {
+        let _ = (snapshot, firmware, words, chip);
+        Err(EOPNOTSUPP)
+    }
+}
+
 /// The hardware record of a device-tree SoC ([`record`]): built from the GPU node's properties
 /// and operating-point tables, the layout's IOMapping table, the ADT regions and sensor rows,
 /// and the SoC's `reference` words, which neither carries.
@@ -206,7 +244,9 @@ pub(crate) fn hardware_record(
         usc_base: hw::client::COMPACT_WINDOW.start,
         user_end: hw::USER_RANGE.end,
         timestamps: va::TIMESTAMPS,
-        sensor_rows: adt.sensor_rows,
+        sensor_rows: if native.is_some() {
+            adt.native.as_ref().ok_or(EINVAL)?.properties(cfg.chip_id)?.sensor_rows
+        } else { adt.sensor_rows },
         reference,
     };
     let mut out = KVVec::from_elem(0u8, record::SIZE, GFP_KERNEL)?;

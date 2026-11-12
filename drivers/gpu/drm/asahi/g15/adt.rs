@@ -41,26 +41,48 @@ use super::boot::glue;
 use super::hw;
 
 pub(crate) mod native;
+pub(crate) mod native_mtr;
+pub(crate) mod native_firmware;
+pub(crate) mod source;
 
 /// Owns the copied source for every native property view and the sensor rows.
 /// Construction copies the retained export once; no views borrow mapped RAM.
 pub(crate) struct NativeAdt {
     data: KVVec<u8>,
+    source: source::Source,
 }
 
 impl NativeAdt {
-    fn read(dev: &device::Device, chip: u32) -> Result<Self> {
+    pub(crate) fn read(dev: &device::Device, chip: u32) -> Result<Self> {
         let (start, size) = glue::native_adt_phram()?;
         let data = super::identity::copy_physical(start, usize::try_from(size)?)?;
         native::parse(&data, chip).map_err(|why| {
             dev_err!(dev, "native ADT refused: {}\n", why);
             EINVAL
         })?;
-        Ok(Self { data })
+        Ok(Self { data, source: source::Source::new()? })
+    }
+
+    pub(crate) fn source_identity(&self) -> &source::Source {
+        &self.source
+    }
+
+    /// Compare boot segment descriptions from this same immutable copy before
+    /// any native TEXT copy. Metadata agreement is not a memory-access lease,
+    /// cache/handoff qualification or proof of the currently executing image.
+    pub(crate) fn check_firmware_regions(&self, chip: u32, text: &Range<u64>,
+                                         data: &Range<u64>) -> Result {
+        native_firmware::validate(&self.data, chip, text, data).map_err(|_| EINVAL)
     }
 
     pub(crate) fn properties(&self, chip: u32) -> Result<native::Properties<'_>> {
         native::parse(&self.data, chip).map_err(|_| EINVAL)
+    }
+
+    /// Enabled sensor membership from this same immutable source copy. This
+    /// is distinct from both selected hotspot masks and from SGX core masks.
+    pub(crate) fn mtr_membership(&self, chip: u32) -> Result<native_mtr::Membership<'_>> {
+        native_mtr::Membership::new(&self.data, chip).map_err(|_| EINVAL)
     }
 }
 

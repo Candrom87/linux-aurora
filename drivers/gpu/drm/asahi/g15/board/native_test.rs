@@ -32,6 +32,7 @@ unsafe extern "C" fn asahi_g15_native_board_test_prop(
 
 fn fixture_adt() -> GpuAdt {
     let mut adt = GpuAdt {
+        native: None,
         ttbs: 0x4000..0x8000,
         tables: 0x8000..0x48000,
         handoff: 0x48000..0x4c000,
@@ -75,7 +76,7 @@ fn run(dev: &device::Device, chip: u32, full: bool, output: &mut [u32]) -> Resul
     // property case must fail here, without silently selecting J516C data.
     if full {
         let _ = super::super::initdata::prepare_board(
-            dev, &hw::t6034::CONFIG, &fixture_adt(), None,
+            dev, &hw::t6034::CONFIG, &fixture_adt(), None, None,
         )?;
         // A packet-only preflight unexpectedly succeeded. Keep this distinct
         // from its required EINVAL refusal so the C assertion detects it.
@@ -155,6 +156,8 @@ fn native_images(dev: &device::Device, bundle: &native::Bundle, output: &mut [u3
         return Err(EINVAL);
     };
     let mut adt = fixture_adt();
+    adt.native = Some(super::super::adt::NativeAdt::read(dev, 0x6034)?);
+    adt.sensor_rows = adt.native.as_ref().ok_or(EINVAL)?.properties(0x6034)?.sensor_rows;
     // Poison the unrelated legacy cache. No OPP phandles exist on the test
     // device, so reconstructing performance input cannot silently succeed.
     adt.perf_mhz.fill(u32::MAX);
@@ -162,8 +165,8 @@ fn native_images(dev: &device::Device, bundle: &native::Bundle, output: &mut [u3
     adt.cluster_mv.fill([u32::MAX; 4]);
     adt.cluster_cells = 0;
     adt.sram_mv.fill(1);
-    let (hardware, globals, power, khz) = super::super::initdata::prepare_board(
-        dev, &hw::t6034::CONFIG, &adt, Some(bundle),
+    let (hardware, globals, power, khz) = super::super::initdata::fixture_bundle_board(
+        dev, &hw::t6034::CONFIG, &adt, bundle,
     )?;
     if count != 9 || word(&hardware, hwdata::DVFS_COUNT)? != 8
         || word(&hardware, record::MAX_POWER)? != reference.max_power_mw
@@ -255,6 +258,119 @@ unsafe extern "C" fn asahi_g15_native_bundle_images_test(
     let (dev, bundle, output) = unsafe { (device::Device::from_raw(raw),
         &*bundle.cast::<native::Bundle>(), core::slice::from_raw_parts_mut(output, 6)) };
     match native_images(dev, bundle, output) {
+        Ok(()) => 6,
+        Err(error) => error.to_errno(),
+    }
+}
+
+
+fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Result {
+    let mut adt = fixture_adt();
+    adt.native = Some(super::super::adt::NativeAdt::read(dev, 0x6034)?);
+    // Invented boot descriptors in the marked QEMU export. No firmware bytes
+    // are read: every real profile remains unqualified for native production.
+    adt.text = 0x10a180000..0x10a184000;
+    adt.data = 0x10a184000..0x10a188000;
+    if super::super::identity::native_firmware(dev, &adt, hw::t6034::CONFIG.firmware,
+        0x6034).err() != Some(EINVAL)
+    {
+        return Err(EINVAL);
+    }
+    let firmware = super::super::identity::fixture_native_firmware(dev, &adt)?;
+    let words = native::Words {
+        identity: values[..6].try_into().map_err(|_| EINVAL)?,
+        coefficients: values[6..10].try_into().map_err(|_| EINVAL)?,
+        coefficients_present: values[10],
+        map_banks: [values[11..19].try_into().map_err(|_| EINVAL)?,
+            values[19..27].try_into().map_err(|_| EINVAL)?],
+        cs_activity_mask: values[27],
+    };
+    // Equal bytes copied again must not impersonate this source allocation.
+    let other = super::super::adt::NativeAdt::read(dev, 0x6034)?;
+    if firmware.matches_source(&other) { return Err(EINVAL); }
+    let original = adt.native.replace(other).ok_or(EINVAL)?;
+    if super::super::initdata::prepare_board(dev, &hw::t6034::CONFIG, &adt,
+        Some(&words), Some(&firmware)).err() != Some(EINVAL)
+    {
+        return Err(EINVAL);
+    }
+    adt.native = Some(original);
+    if !firmware.matches(dev, adt.native.as_ref().ok_or(EINVAL)?) {
+        return Err(EINVAL);
+    }
+    adt.perf_mhz.fill(u32::MAX);
+    adt.perf_mv.fill(u32::MAX);
+    adt.cluster_mv.fill([u32::MAX; 4]);
+    adt.cluster_cells = 0;
+    adt.sensor_rows.fill([0xff; 12]);
+    let (hardware, globals, power, khz) = super::super::initdata::prepare_board(
+        dev, &hw::t6034::CONFIG, &adt, Some(&words), Some(&firmware),
+    )?;
+    if khz != 760000 || word(&hardware, hwdata::DVFS_COUNT)? != 8
+        || word(&globals, 0x7c)? != 600 || word(&globals, 0x80)? != 600
+        || word(&globals, 0x8c)? != 700
+        || word(&hardware, record::MAX_POWER)? == 0
+        || word(&globals, 0x78)? != word(&hardware, record::MAX_POWER)?
+        || word(&power, 0xd0)? != word(&hardware, record::MAX_POWER)?
+    { return Err(EINVAL); }
+    let snapshot = adt.native.as_ref().ok_or(EINVAL)?;
+    let properties = snapshot.properties(0x6034)?;
+    let primary = [0usize, 1, 4, 6, 8, 10, 12, 13, 12];
+    let secondary = [0usize, 1, 3, 5, 7, 9, 11, 12, 13];
+    let hz_source = properties.sram.unwrap_or(properties.main);
+    let raw_count = properties.gpu_num_perf_states as usize + 1;
+    let le = |bytes: &[u8], at: usize| -> Result<u32> {
+        Ok(u32::from_le_bytes(bytes.get(at..at + 4).ok_or(EINVAL)?
+            .try_into().map_err(|_| EINVAL)?))
+    };
+    for state in 0..primary.len() {
+        for (index, offset) in [(primary[state], 0xb5c), (secondary[state], 0xf9c),
+            (secondary[state], 0x1350)]
+        {
+            let hz = le(hz_source, (3 * raw_count + index) * 8)?;
+            if word(&hardware, offset + state * 4)? != hz / 1_000_000 { return Err(EINVAL); }
+        }
+        for lane in 0..8 {
+            let source_lane = if lane < 4 { lane } else { 0 };
+            let at = (source_lane * raw_count + primary[state]) * 8 + 4;
+            if word(&hardware, 0xb9c + state * 32 + lane * 4)? != le(properties.main, at)?
+                || word(&hardware, 0xd9c + state * 32 + lane * 4)? != le(properties.sram.ok_or(EINVAL)?, at)?
+            { return Err(EINVAL); }
+        }
+    }
+    for (row, value) in properties.sensor_rows.iter().enumerate() {
+        let at = record::HWDATA_A + 0x6c58 + row * 12;
+        if hardware.get(at..at + 12) != Some(value.as_slice()) { return Err(EINVAL); }
+    }
+    let membership = snapshot.mtr_membership(0x6034).map_err(|_| EINVAL)?;
+    if membership.records() != 128 || membership.unique_ids() != 128 { return Err(EINVAL); }
+    for (offset, expected) in [(0x8ac, 0x802a002b802a002bu128),
+        (0x1490, 0x802a002b802a002bu128), (0x24a8, u128::MAX)]
+    {
+        let at = record::HWDATA_A + offset;
+        if hardware.get(at..at + 16) != Some(expected.to_le_bytes().as_slice()) { return Err(EINVAL); }
+    }
+    let missing = native::Words { coefficients_present: 0, ..words };
+    if super::super::initdata::prepare_board(dev, &hw::t6034::CONFIG, &adt,
+        Some(&missing), Some(&firmware)).err() != Some(EINVAL)
+    { return Err(EINVAL); }
+    output.copy_from_slice(&[hardware.len() as u32, globals.len() as u32, power.len() as u32,
+        word(&hardware, 0xa28)?, word(&hardware, record::IOMAPS + 32 * 11 + 0x10)?, khz]);
+    Ok(())
+}
+
+/// # Safety
+/// The marked C fixture retains its device, 28 immutable words and independent
+/// six-word output for this synchronous CPU/metadata-only call.
+#[no_mangle]
+unsafe extern "C" fn asahi_g15_native_owned_images_test(
+    raw: *mut bindings::device, words: *const u32, output: *mut u32,
+) -> i32 {
+    if raw.is_null() || words.is_null() || output.is_null() { return EINVAL.to_errno(); }
+    // SAFETY: The C fixture's retained allocations satisfy the contract above.
+    let (dev, words, output) = unsafe { (device::Device::from_raw(raw),
+        core::slice::from_raw_parts(words, 28), core::slice::from_raw_parts_mut(output, 6)) };
+    match owned_images(dev, words, output) {
         Ok(()) => 6,
         Err(error) => error.to_errno(),
     }

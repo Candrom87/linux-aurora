@@ -13,6 +13,7 @@
 extern int asahi_g15_native_board_test(struct device *, u32, bool, u32 *);
 extern const char *asahi_g15_native_board_test_prop(u32, u32 *);
 extern int asahi_g15_native_bundle_images_test(struct device *, const void *, size_t, u32 *);
+extern int asahi_g15_native_owned_images_test(struct device *, const u32 *, u32 *);
 static atomic_t serial = ATOMIC_INIT(0);
 
 struct fixture {
@@ -328,6 +329,21 @@ static void native_bundle_images(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, asahi_g15_native_bundle_images_test(&pdev->dev,
 		bundle, sizeof(*bundle), output), -EINVAL);
 	KUNIT_EXPECT_PTR_EQ(test, memchr_inv(output, 0xa5, sizeof(output)), NULL);
+	{
+		u32 words[28];
+
+		memcpy(words, input->input.identity, 6 * sizeof(u32));
+		memcpy(words + 6, &input->input.coefficients, 5 * sizeof(u32));
+		memcpy(words + 11, input->input.map_banks, 16 * sizeof(u32));
+		words[27] = input->input.cs_activity_mask;
+		KUNIT_ASSERT_EQ(test, asahi_g15_native_owned_images_test(&pdev->dev, words, output), 6);
+		KUNIT_EXPECT_EQ(test, output[0], 0xb480U);
+		KUNIT_EXPECT_EQ(test, output[1], 15868U);
+		KUNIT_EXPECT_EQ(test, output[2], 2292U);
+		KUNIT_EXPECT_EQ(test, output[3], 0x6034U);
+		KUNIT_EXPECT_EQ(test, output[4], 6U * 0xd8000);
+		KUNIT_EXPECT_EQ(test, output[5], 760000U);
+	}
 }
 
 static struct kunit_case cases[] = {

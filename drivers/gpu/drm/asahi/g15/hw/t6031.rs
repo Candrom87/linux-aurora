@@ -140,6 +140,7 @@ pub(crate) const CONFIG: Config = Config {
         FirmwareBuild {
             name: "macOS 14.7 stub firmware (iBoot-10151.140.19.700.2), J516C",
             machine: Some(kernel::c_str!("apple,j516c")),
+            native_board_contract: None,
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -152,6 +153,7 @@ pub(crate) const CONFIG: Config = Config {
         FirmwareBuild {
             name: "macOS 14.8 stub firmware, J516C",
             machine: Some(kernel::c_str!("apple,j516c")),
+            native_board_contract: None,
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -167,6 +169,7 @@ pub(crate) const CONFIG: Config = Config {
         FirmwareBuild {
             name: "J514C macOS 14.7 boot-chain firmware",
             machine: Some(kernel::c_str!("apple,j514c")),
+            native_board_contract: None,
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,

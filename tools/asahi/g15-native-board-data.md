@@ -1,11 +1,12 @@
 # Experimental G15C native board construction
 
-`Board::DeviceTreeNative` now requires one complete immutable computed bundle:
-the packet, imported raw main/SRAM/CS/AFR tables and three independent caps.
-`prepare_board` binds and validates them together, then constructs HardwareData,
-Globals and Power. A short `asahi,g15c-native-board-data` OF property alone is
-insufficient; normal T6034 startup refuses before its Regs::new/hold_power until
-a qualified input/provider path supplies the bundle. This does not describe all
+`Board::DeviceTreeNative` requires one immutable original source, its matching
+native firmware/device context and explicit register words. `prepare_board`
+computes, binds and validates the complete bundle (packet, imported raw
+main/SRAM/CS/AFR tables and separate caps), then constructs HardwareData, Globals
+and Power. A short `asahi,g15c-native-board-data` property or raw bundle cannot
+replace that production input context. Normal T6034 startup still refuses
+before its Regs::new/hold_power until firmware and fresh inputs are qualified. This does not describe all
 earlier platform/supplier or firmware-identity operations.
 
 The checked integer C producer API is in `g15/power/native.h`. The source scope
@@ -55,3 +56,29 @@ These tests establish software construction, not this Mac's provenance or safe
 power limits. Exact immutable input ownership, firmware/source qualification,
 physical provider/power/cache/memory/startup and independently checked rendering
 remain required. No fixture Image or child is suitable for Mac installation.
+
+
+The native entry now requires an immutable `NativeAdt`, an exact
+`NativeFirmware` source/device context and explicit register-only `Words`.
+Performance properties, sensor rows and enabled MTR membership come from that
+one private copy. Equal-content copies have distinct identities, stable across
+Rust object moves. Only the internal factory creates its integer C input; masks
+are selected from membership and the scoped contract rather than supplied in
+`Words`. The C output is heap allocated and checked/bound before image writing.
+The model's -1/-2/-3 statuses map to EINVAL while real Linux errno is preserved.
+
+Native export copying first requires one enabled, non-reusable, non-no-map,
+16-KiB-aligned reserved-RAM owner, at most 2 MiB. The source's firmware segment
+metadata must agree before native TEXT copy, and a board/model-tagged descriptor
+must be eligible before measurement. All seven current real descriptors remain
+untagged; no physical native firmware pairing is established. Legacy prefix
+policy and complete image tuples stay unchanged. Ordinary probe supplies no
+fresh register words and cannot start the GPU.
+
+The KUnit owner path reads the real reserved-RAM fixture export, checks actual
+same-copy/device association and runs the typed producer into all three images.
+Its positive firmware context is explicitly synthetic and test-only, not loaded
+firmware measurement; its descriptor appears in no production profile. This is
+not proof of fresh power-owned register acquisition or physical compatibility.
+Controller properties still come through OF and need association with that same
+original source. Qualified provider/power/cache/memory/startup remains required.

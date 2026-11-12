@@ -78,6 +78,7 @@ pub(crate) const CONFIG: Config = Config {
     firmware: &[FirmwareBuild {
         name: "J514M RTKit 2419.140.12 (runtime qualification pending)",
         machine: Some(kernel::c_str!("apple,j514m")),
+        native_board_contract: None,
         text_size: 0x64000,
         data_size: 0x140000,
         marker: 0x5cf28,
