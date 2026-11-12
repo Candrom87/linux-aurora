@@ -58,9 +58,8 @@ pub(crate) enum Board {
     /// Explicit boot-loader model cells, checked against this chip and the
     /// record builder's primary/secondary grouping before Regs::new/hold_power
     /// and firmware startup, not before every platform supplier's PM activity.
-    /// No current configuration selects this source.
+    /// T6034 requires this source; absence or invalid data refuses preflight.
     #[cfg(CONFIG_DRM_ASAHI_G15)]
-    #[allow(dead_code)]
     DeviceTreeNative,
     /// No board data: admission refuses the SoC before anything firmware-visible.
     None,

@@ -19,6 +19,8 @@ pub(crate) mod data;
 pub(crate) mod record;
 pub(crate) mod template;
 pub(crate) mod words;
+#[cfg(CONFIG_DRM_ASAHI_G15_BOARD_KUNIT_TEST)]
+mod native_test;
 
 use kernel::{c_str, device, prelude::*};
 

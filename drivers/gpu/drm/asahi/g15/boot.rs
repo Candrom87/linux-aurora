@@ -468,7 +468,8 @@ pub(crate) fn admit(
     let dev = pdev.as_ref();
     let pmp = cfg.platform == hw::Platform::AdtWithPmp;
     // J514C uses the same-die T6031 path on a normal boot. This does not qualify
-    // the inherited J516C reference words. Keep exact board AND SoC checks;
+    // the inherited J516C reference words on J514C. J514M requires its own
+    // native board packet in preflight. Keep exact board AND SoC checks;
     // T6034 boards use their own profile and never inherit T6031 admission.
     // The remaining display, DT/ADT, full firmware identity, hardware identity
     // and record-builder admission below is unchanged.

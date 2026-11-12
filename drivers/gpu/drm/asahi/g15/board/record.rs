@@ -1189,7 +1189,7 @@ mod tests {
             let reference = Reference::from_native_cells(0x6034, &cells).unwrap();
             let mut input = inputs(&main, &cs, &[]);
             input.chip_id = 0x6034;
-        input.reference = &reference;
+            input.reference = &reference;
             assert_eq!(build(&mut vec![0; SIZE], &input),
                        Err("GPU performance-state grouping lacks matching board evidence"));
         }

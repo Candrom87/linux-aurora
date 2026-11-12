@@ -6,8 +6,9 @@
 //! enabled masks [0x1fd, 0x1fd, 0x1fc, 0x1ed], or 30 enabled cores. Its ADT has
 //! four voltage tables and six memory channels. The four-cluster G15C object
 //! and command layouts below are inherited from T6031; they are not a native
-//! macOS capture of this machine. The J516C power/reference words remain
-//! unqualified for this board and are identified at admission.
+//! macOS capture of this machine. Board preflight requires explicit native
+//! model data for this chip; it never substitutes J516C reference words.
+//! The packet format alone does not qualify its producer or physical limits.
 //!
 //! The loaded firmware identity below was measured after native display
 //! publication on J514M. Runtime and power/thermal qualification remain
@@ -89,7 +90,7 @@ pub(crate) const CONFIG: Config = Config {
     machine: kernel::c_str!("apple,j514m"),
     platform: super::Platform::DeviceTree,
     layout: &LAYOUT,
-    board: super::Board::DeviceTree(&super::super::board::record::J516C),
+    board: super::Board::DeviceTreeNative,
     // Binning changes enabled masks, not the four physical clusters or the
     // ten slots per cluster used by these G15C command words.
     compute: super::t6031::CONFIG.compute,

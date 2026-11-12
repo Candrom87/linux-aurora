@@ -77,3 +77,13 @@ config DRM_ASAHI_G15
 	  The native display driver must be built in, or both drivers must
 	  be modules, so a modular display provider finishes initialization
 	  before the GPU module can probe through its direct helper import.
+
+config DRM_ASAHI_G15_BOARD_KUNIT_TEST
+	bool "Test G15 native board metadata with KUnit"
+	depends on KUNIT && DRM_ASAHI=y && DRM_ASAHI_G15 && OF_DYNAMIC
+	default n
+	help
+	  Exercise the real OF property reader and synchronous T6034 board-image
+	  preflight using synthetic metadata in the marked QEMU handoff fixture.
+	  No GPU registers, firmware, power operations or workloads are used.
+	  The test skips on other machines. Say N outside metadata testing.
