@@ -7,8 +7,8 @@ use super::record::{self, NativeTables, Reference};
 
 type R<T> = Result<T, &'static str>;
 
-/// Exact C output. Heap-allocated uninitialized by the kernel adapter; fully
-/// initialized only by a successful C call. No floating-point fields cross ABI.
+/// Exact C output, fully initialized only by a successful C call. The current
+/// construction view borrows its immutable owner; no float fields cross ABI.
 #[repr(C)]
 pub(crate) struct Bundle {
     length: u32,

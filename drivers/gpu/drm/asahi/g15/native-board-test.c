@@ -168,7 +168,8 @@ static void run(struct kunit *test, const u32 *cells, size_t bytes,
 static void missing_property(struct kunit *test)
 {
 	run(test, NULL, 0, 0x6034, false, -ENOENT);
-	run(test, NULL, 0, 0x6034, true, -ENOENT);
+	/* Configured startup requires a complete bundle before packet metadata. */
+	run(test, NULL, 0, 0x6034, true, -EINVAL);
 }
 
 static void exact_roundtrip(struct kunit *test)
