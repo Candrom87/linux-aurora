@@ -235,6 +235,29 @@ static void malformed_import(struct kunit *test)
 	unchanged(test, out);
 }
 
+static void absent_sram(struct kunit *test)
+{
+	struct fixture *f = fixture(test);
+	struct g15c_board_bundle *out = output(test);
+	u32 row, lane;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, out);
+	f->input.sram = (struct g15c_property) { NULL, 0 };
+	KUNIT_ASSERT_EQ(test, asahi_g15c_source_bundle(&f->input, 0x6034, out), G15C_OK);
+	for (row = 0; row < RAW; row++) {
+		KUNIT_EXPECT_EQ(test, out->tables.main.hz[row], 24000000U + row * 53000000 + 3 * 17);
+		for (lane = 0; lane < 8; lane++) {
+			u32 core = 500 + row * 37 + lane * 3;
+			u32 expected = lane >= 4 ? 0 : core < 789 ? 789 : 500 + row * 37;
+
+			/* Exact source fallback, including its lane-zero choice and
+			 * untouched absent lanes, rather than a generic max clamp. */
+			KUNIT_EXPECT_EQ(test, out->tables.main.sram_mv[row][lane], expected);
+		}
+	}
+}
+
 static void shared_rail(struct kunit *test)
 {
 	struct fixture *f = fixture(test);
@@ -309,7 +332,7 @@ static void repeat_owned_input(struct kunit *test)
 
 static struct kunit_case cases[] = {
 	KUNIT_CASE(decode), KUNIT_CASE(bundle), KUNIT_CASE(revision_caps),
-	KUNIT_CASE(malformed_import), KUNIT_CASE(shared_rail),
+	KUNIT_CASE(malformed_import), KUNIT_CASE(absent_sram), KUNIT_CASE(shared_rail),
 	KUNIT_CASE(refused_context), KUNIT_CASE(late_failure),
 	KUNIT_CASE(repeat_owned_input), {}
 };
