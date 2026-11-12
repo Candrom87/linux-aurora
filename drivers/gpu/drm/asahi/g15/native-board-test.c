@@ -342,7 +342,7 @@ static void native_bundle_images(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, output[2], 2292U);
 		KUNIT_EXPECT_EQ(test, output[3], 0x6034U);
 		KUNIT_EXPECT_EQ(test, output[4], 6U * 0xd8000);
-		KUNIT_EXPECT_EQ(test, output[5], 760000U);
+		KUNIT_EXPECT_EQ(test, output[5], 720000U);
 	}
 }
 

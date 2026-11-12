@@ -306,7 +306,9 @@ fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Res
     let (hardware, globals, power, khz) = super::super::initdata::prepare_board(
         dev, &hw::t6034::CONFIG, &adt, Some(&words), Some(&firmware),
     )?;
-    if khz != 760000 || word(&hardware, hwdata::DVFS_COUNT)? != 8
+    // The separate QEMU original table uses 200 + 40*n MHz for rows 1..13;
+    // both selected maps retain row 13, so the maximum is 720 MHz.
+    if khz != 720000 || word(&hardware, hwdata::DVFS_COUNT)? != 8
         || word(&globals, 0x7c)? != 600 || word(&globals, 0x80)? != 600
         || word(&globals, 0x8c)? != 700
         || word(&hardware, record::MAX_POWER)? == 0
