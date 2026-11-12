@@ -6,6 +6,30 @@
 use super::*;
 use kernel::bindings;
 
+/// Static names and the same valid synthetic scalar words used by the core
+/// record tests. The C fixture installs them as actual OF properties.
+///
+/// # Safety
+/// `value` points to an independently writable u32 for this call. The returned
+/// name is static kernel data and must not be freed by C.
+#[no_mangle]
+unsafe extern "C" fn asahi_g15_native_board_test_prop(
+    index: u32,
+    value: *mut u32,
+) -> *const core::ffi::c_char {
+    let Some((name, _)) = record::PROPS.get(index as usize) else {
+        return core::ptr::null();
+    };
+    if value.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: The C fixture owns the u32 output for this synchronous call.
+    unsafe {
+        value.write(record::synthetic_props()[index as usize]);
+    }
+    name.as_char_ptr()
+}
+
 fn fixture_adt() -> GpuAdt {
     let mut adt = GpuAdt {
         ttbs: 0x4000..0x8000,

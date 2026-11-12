@@ -1035,6 +1035,38 @@ pub(crate) fn build(out: &mut [u8], i: &Inputs<'_>) -> R<()> {
     tail(out)
 }
 
+// Synthetic CPU/KUnit data only, never a device profile.
+#[cfg(any(test, CONFIG_DRM_ASAHI_G15_BOARD_KUNIT_TEST))]
+pub(crate) fn synthetic_props() -> [u32; PROPS.len()] {
+    let mut p = [0u32; PROPS.len()];
+    p[PERIOD_MS] = 8;
+    p[BASE_PSTATE] = 1;
+    p[MIN_SRAM_UV] = 815000;
+    p[CSAFR_MIN_SRAM_UV] = 815000;
+    p[AVG_TC_MS] = 32;
+    p[AVG_KI] = 0x41480000;
+    p[AVG_KP] = 0x3e99999a;
+    p[AVG_MIN_DUTY] = 40;
+    p[AVG_TGT_TC] = 1;
+    p[FD_KI] = 0x443b8000;
+    p[FD_KP] = 0x42080000;
+    p[PERF_TC] = 5;
+    p[PERF_TC2] = 200;
+    p[PERF_RESET] = 6;
+    p[PPM_TC_MS] = 34;
+    p[PPM_KI] = 0x4198cccd;
+    p[PPM_KP] = 0x3e99999a;
+    p[PWR_TC] = 313;
+    p[PWR_MIN_DUTY] = 40;
+    p[AIC_CLKS] = 200000;
+    p[SE_TC] = 9;
+    p[SE_TC1] = 3;
+    p[SE_KI] = (-50.0f32).to_bits();
+    p[SE_KI1] = (-100.0f32).to_bits();
+    p[SE_TARGET] = 1400;
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1069,33 +1101,7 @@ mod tests {
     }
 
     fn props() -> [u32; PROPS.len()] {
-        let mut p = [0u32; PROPS.len()];
-        p[PERIOD_MS] = 8;
-        p[BASE_PSTATE] = 1;
-        p[MIN_SRAM_UV] = 815000;
-        p[CSAFR_MIN_SRAM_UV] = 815000;
-        p[AVG_TC_MS] = 32;
-        p[AVG_KI] = 0x41480000;
-        p[AVG_KP] = 0x3e99999a;
-        p[AVG_MIN_DUTY] = 40;
-        p[AVG_TGT_TC] = 1;
-        p[FD_KI] = 0x443b8000;
-        p[FD_KP] = 0x42080000;
-        p[PERF_TC] = 5;
-        p[PERF_TC2] = 200;
-        p[PERF_RESET] = 6;
-        p[PPM_TC_MS] = 34;
-        p[PPM_KI] = 0x4198cccd;
-        p[PPM_KP] = 0x3e99999a;
-        p[PWR_TC] = 313;
-        p[PWR_MIN_DUTY] = 40;
-        p[AIC_CLKS] = 200000;
-        p[SE_TC] = 9;
-        p[SE_TC1] = 3;
-        p[SE_KI] = (-50.0f32).to_bits();
-        p[SE_KI1] = (-100.0f32).to_bits();
-        p[SE_TARGET] = 1400;
-        p
+        synthetic_props()
     }
 
     /// Arbitrary reference words, distinct from the J516C's.

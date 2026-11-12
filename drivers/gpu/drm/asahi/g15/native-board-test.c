@@ -10,6 +10,7 @@
 #define HEADER 16
 #define CAPACITY 70
 extern int asahi_g15_native_board_test(struct device *, u32, bool, u32 *);
+extern const char *asahi_g15_native_board_test_prop(u32, u32 *);
 static atomic_t serial = ATOMIC_INIT(0);
 
 struct fixture {
@@ -79,8 +80,7 @@ static void run(struct kunit *test, const u32 *cells, size_t bytes,
 	struct fixture *f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
 	struct platform_device *pdev;
 	struct device_node *source = test->priv;
-	u32 result[CAPACITY], values[64];
-	struct property *p;
+	u32 result[CAPACITY], value;
 	char name[64];
 	int ret, n;
 
@@ -95,24 +95,28 @@ static void run(struct kunit *test, const u32 *cells, size_t bytes,
 	KUNIT_ASSERT_EQ(test, of_changeset_add_prop_string(&f->changes,
 		f->node, "status", "disabled"), 0);
 	if (full) {
-		/* Only modeled controller/auxiliary metadata. No compatible, reg,
-		 * driver binding, original GPU-node change or hardware operation. */
-		for_each_property_of_node(source, p) {
-			if (strncmp(p->name, "apple,", 6) || p->length <= 0 ||
-			    (size_t)p->length > sizeof(values) || p->length % 4 ||
-			    !strcmp(p->name, "apple,power-sample-period"))
-				continue;
-			n = p->length / 4;
-			KUNIT_ASSERT_EQ(test, of_property_read_u32_array(test->priv,
-				p->name, values, n), 0);
-			KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32_array(
-				&f->changes, f->node, p->name, values, n), 0);
+		static const char * const refs[] = { "apple,cs-opp", "apple,afr-opp" };
+
+		/* Reuse the core tests' valid fictional controllers, including
+		 * proper IEEE gains and consistent periods. No private calibration. */
+		for (n = 0; n < 64; n++) {
+			const char *key = asahi_g15_native_board_test_prop(n, &value);
+
+			if (!key)
+				break;
+			KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes,
+				f->node, key, value), 0);
 		}
-		/* The metadata fixture's one-unit time constants need a fictional
-		 * one-unit sample interval for complete controller construction.
-		 * A ten-unit interval correctly refuses the rounded zero filter. */
+		KUNIT_ASSERT_EQ(test, n, 43);
 		KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes,
-			f->node, "apple,power-sample-period", 1), 0);
+			f->node, "apple,idleoff-standby-timer", 42), 0);
+		/* Only auxiliary-table references come from the modeled handoff.
+		 * No compatible, reg, binding or original GPU-node change. */
+		for (n = 0; n < ARRAY_SIZE(refs); n++) {
+			KUNIT_ASSERT_EQ(test, of_property_read_u32(source, refs[n], &value), 0);
+			KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes,
+				f->node, refs[n], value), 0);
+		}
 	}
 	if (cells) {
 		struct of_changeset_entry *entry;
