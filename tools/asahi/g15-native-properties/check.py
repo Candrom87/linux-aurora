@@ -3,7 +3,7 @@
 """Actual immutable native property parser on invented bounded ADTs only."""
 import argparse,copy,hashlib,json,struct,subprocess,tempfile
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[2];HERE=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parents[3];HERE=Path(__file__).resolve().parent
 G15=ROOT/'drivers/gpu/drm/asahi/g15'
 def block(text,marker):
  a=text.index(marker);z=text.index('{',a)+1;d=1

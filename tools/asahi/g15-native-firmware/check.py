@@ -122,7 +122,7 @@ def main():
                 ('native-ignores-chip','identity','chip != 0x6034 ||','(false && chip != 0x6034) ||'),
                 ('native-ignores-machine','identity','!glue::machine(c_str!("apple,j514m"))','(false && !glue::machine(c_str!("apple,j514m")))'),
                 ('copies-before-source-owner','identity',delayed,delayed_new),
-                ('legacy-loses-prefix','identity','firmware_checked(dev, adt, builds, prefix, None)','firmware_checked(dev, adt, builds, 0, None)'),
+                ('legacy-loses-prefix','identity','firmware_checked(dev, adt, builds, prefix, None)','{ let _ = prefix; firmware_checked(dev, adt, builds, 0, None) }'),
                 ('ignore-machine-scope','identity','b.machine.map_or(true, glue::machine)','(true || b.machine.map_or(true, glue::machine))'),
                 ('bind-wrong-pinned-entry','identity','builds.get(i).ok_or(EINVAL)?','builds.get(i - i).ok_or(EINVAL)?'),
                 ('skip-entropy-normalization','identity','copy[at + 8..at + 16].fill(0);','copy[at + 8..at + 16].fill(0xe7);'),
