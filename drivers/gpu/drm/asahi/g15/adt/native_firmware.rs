@@ -21,7 +21,7 @@ pub(super) fn validate(bytes: &[u8], chip: u32, text: &Range<u64>,
     let armio = child(&adt, 0, b"arm-io\0")?;
     let sgx = child(&adt, armio, b"sgx\0")?;
     let asc = child(&adt, armio, b"gfx-asc\0")?;
-    let nub = child(&adt, asc, b"iop-gfx-nub\0")?;
+    let nub = child(&adt, asc, b"iop-gfx-nub0\0")?;
     if required(&adt, sgx, b"compatible")? != b"gpu,t6034\0" ||
         u32_property(&adt, nub, b"pre-loaded")? != 1
     {

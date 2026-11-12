@@ -33,7 +33,7 @@ def base(text=TEXT, data=DATA, dram=(0x10000, 0x100000)):
         ('dram-base', struct.pack('<Q', dram[0])), ('dram-size', struct.pack('<Q', dram[1]))]),
         node('arm-io', children=[node('sgx', [('compatible', b'gpu,t6034\0')]),
             node('gfx-asc', [('segment-names', b'__TEXT;__DATA\0'), ('segment-ranges', ranges)],
-                 [node('iop-gfx-nub', [('pre-loaded', struct.pack('<I', 1)), ('segment-ranges', ranges)])])])])
+                 [node('iop-gfx-nub0', [('pre-loaded', struct.pack('<I', 1)), ('segment-ranges', ranges)])])])])
 
 
 def replace(tree, path, key, value):
@@ -88,6 +88,9 @@ def cases():
         bad = copy.deepcopy(first); replace(bad, [1, 1], 'segment-names', value); add('wrong-names', bad)
     for value in (0, 2, 0xffffffff):
         bad = copy.deepcopy(first); replace(bad, [1, 1, 0], 'pre-loaded', struct.pack('<I', value)); add('preloaded', bad)
+    for value in [b'iop-gfx-nub\0', b'iop-gfx-nub1\0', b'iop-gfx-nub00\0',
+                  b'iop-gfx-nub0', b'iop-gfx-nub0\0extra']:
+        bad = copy.deepcopy(first); replace(bad, [1, 1, 0], 'name', value); add('wrong-nub-name', bad)
     raw = next(value for key, value in first[1][1][1][1][0] if key == 'segment-ranges')
     for row in (0, 1):
         for offset, fmt, value in [(0, 'Q', 0), (0, 'Q', 0x10001), (8, 'Q', UPPER + 0x8000),
