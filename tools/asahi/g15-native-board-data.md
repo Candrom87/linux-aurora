@@ -1,70 +1,57 @@
-# Experimental G15C native board-data transport
+# Experimental G15C native board construction
 
-`Board::DeviceTreeNative` consumes `asahi,g15c-native-board-data` from the GPU
-node. T6034/J514M now requires this source in board preflight and never falls
-back to J516C reference words. Supplying this property alone does not register,
-enable or admit another GPU. Board/firmware identities remain unchanged.
+`Board::DeviceTreeNative` now requires one complete immutable computed bundle:
+the packet, imported raw main/SRAM/CS/AFR tables and three independent caps.
+`prepare_board` binds and validates them together, then constructs HardwareData,
+Globals and Power. A short `asahi,g15c-native-board-data` OF property alone is
+insufficient; normal T6034 startup refuses before its Regs::new/hold_power until
+a qualified input/provider path supplies the bundle. This does not describe all
+earlier platform/supplier or firmware-identity operations.
 
-This is an original boot-loader/kernel transport, not an Apple firmware ABI or
-an authentication mechanism. The producer must establish the appropriate
-version, branch, same-boot inputs and independent mask provenance. Machine,
-firmware identity, reserved-memory, supplier and startup checks remain separate.
+The checked integer C producer API is in `g15/power/native.h`. The source scope
+is 23J220; neither this name nor its transport tag is a firmware ABI admission,
+source authentication, same-boot attestation or physical power-unit/limit proof.
+Machine/loaded-firmware identities and other startup checks remain unchanged.
+There is no qualified acquisition/start caller yet and no physical acceleration.
 
-The property is an array of big-endian u32 DT cells. The OF decoder produces
-host-endian values; the record serializer writes bounded little-endian bytes.
-For selected state count `N`, it contains exactly `16 + 3*N` cells:
+The owned packet uses exactly `16+3*N` big-endian u32 cells, `N=2..16`:
 
-| Cell(s) | Meaning |
+| Cells | Value |
 |---|---|
-| 0 | Original contract tag `0x23c22001` |
-| 1 | Chip ID, required to equal the selected kernel configuration |
-| 2 | Native model reference word, unchanged; physical mW units are not inferred |
-| 3 | Selected state count `N`, 2 through 16 |
-| 4–7 | Independent fast-die mask, most significant cell first |
-| 8–11 | Independent SoCHot mask, most significant cell first |
-| 12–15 | Independent alarm/enabled mask, most significant cell first |
-| 16 through `16+N-1` | Ordered primary indices into the raw main OPP table |
-| `16+N` through `16+2*N-1` | Ordered secondary indices |
-| `16+2*N` through `16+3*N-1` | Complete native relative-power words |
+| 0 | Original transport tag `0x23c22001` |
+| 1 | Expected chip ID |
+| 2 | Opaque nonzero native model word; units are not inferred |
+| 3 | Selected count N |
+| 4..7, 8..11, 12..15 | Independent fast-die, SoCHot, enabled/alarm masks; MS cell first |
+| 16..16+N-1 | Primary indices |
+| 16+N..16+2*N-1 | Secondary indices |
+| 16+2*N..16+3*N-1 | Complete relative-power words, including zero and explicit top |
 
-The raw property must be 88–256 bytes, divisible by four, before allocation.
-No omitted cell or independent mask is supplied from another value. Both maps
-must start with zero, contain nonzero in-range later indices and agree exactly
-with the actual primary and secondary tables constructed from the device's
-operating points. Repeated indices are preserved by transport; a conflicting
-record construction is refused. The existing raw-table capacity remains 14;
-the selected-array representation has the firmware's 16-slot capacity.
+Both streams begin with zero and contain bounded nonzero active indices. The
+bundle checks every index against its imported raw count, all geometry/caps and
+the shared auxiliary rail. It preserves repeated/nonmonotonic native selections;
+no voltage grouping is substituted. The existing base-state invariant remains
+required. The raw capacity is fourteen and the selected capacity sixteen.
 
-Every relative-power word is transported, including state zero and the native
-top word. State zero must be zero; the top is not forced to 100. The producer
-must compute its model using the matching selected rows and CS-state semantics,
-rather than copying a raw-row prefix or mixing an unrelated selection. The
-packet consistency checks do not prove that producer obligation by themselves.
+Native main/secondary core and SRAM values come exclusively from imported data.
+Legacy SRAM floors and cached OPP rows cannot substitute. CS/AFR retain separate
+counts/frequencies and imported SRAM; their two header words carry count-minus-one
+and independent cap. Globals initial targets use source full-scale interpolation
+and minimum duty; its main cap is separate. Maximum selected frequency is scanned
+without reordering. Pstate reporting retains its owned selected-table snapshot
+before the record becomes firmware-visible. Legacy bytes/status remain unchanged.
 
-The parsed reference owns its arrays, survives through synchronous image
-construction, and leaves only owned images afterward. Validation occurs before
-this admission path reaches `Regs::new` and its `hold_power` request and before
-firmware startup. This does not describe all earlier platform/supplier PM.
-Native-source logs omit actual model values, masks and board-data hashes.
+`DRM_ASAHI_G15_BOARD_KUNIT_TEST` is default-off, built-in-only and requires the
+native arithmetic option. On the marked QEMU fixture, real OF parser tests retain
+the 88..256-byte bounded short-packet checks. Packet-only startup is refused.
+A real C producer bundle then crosses the checked Rust ABI and configured
+preflight into all three images. That test uses private disabled OF nodes and an
+unregistered platform device with conflicting legacy caches/floors and no OPP
+phandles. It checks selected maps, SRAM, caps, masks, relative words, status,
+maximum frequency and six-channel mapping. Changesets/references are released.
+Other machines skip; no GPU registers, power helper or firmware startup runs.
 
-The legacy J516C reference is chip-scoped and retains its established record
-bytes. Relabeling that reference as another chip is refused. A new profile
-still needs its complete reviewed configuration and explicitly authorized
-physical testing; packet parsing or a passing synthetic test is not support.
-
-`DRM_ASAHI_G15_BOARD_KUNIT_TEST` adds an optional built-in test bridge, restricted
-to the marked QEMU metadata fixture. It uses real OF changesets/properties and
-an unregistered platform device, then calls the production Rust property getter
-and configured T6034 preflight. Its performance rows, regions, sensor rows,
-controller words, masks and powers are invented. It never calls `Regs::new`,
-power helpers or firmware startup. Changesets and device/node references are
-released. Other machines skip the suite. This verifies metadata delivery and
-board-image construction, not this Mac's source provenance or safe power limits.
-
-The admitted record's selected count now supplies all three Globals performance
-caps. Native pstate reporting retains an owned copy of its complete selected
-primary frequency table before the record becomes firmware-visible; it does
-not use the fixed legacy nine-entry map or reread firmware-mutated tables.
-The legacy reference's bytes/status text stay unchanged. The kernel preflight
-test also checks every transported mask/ratio, the model word in all images,
-selected caps, selected top frequency and the six-channel T6034 mapping size.
+These tests establish software construction, not this Mac's provenance or safe
+power limits. Exact immutable input ownership, firmware/source qualification,
+physical provider/power/cache/memory/startup and independently checked rendering
+remain required. No fixture Image or child is suitable for Mac installation.

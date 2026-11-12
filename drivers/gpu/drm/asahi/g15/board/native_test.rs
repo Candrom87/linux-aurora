@@ -73,18 +73,14 @@ fn word(bytes: &[u8], at: usize) -> Result<u32> {
 fn run(dev: &device::Device, chip: u32, full: bool, output: &mut [u32]) -> Result<usize> {
     // In full mode, run the configured production route FIRST. The missing
     // property case must fail here, without silently selecting J516C data.
-    let images = if full {
-        if chip != 0x6034 {
-            return Err(EINVAL);
-        }
-        Some(super::super::initdata::prepare_board(
-            dev,
-            &hw::t6034::CONFIG,
-            &fixture_adt(),
-        )?)
-    } else {
-        None
-    };
+    if full {
+        let _ = super::super::initdata::prepare_board(
+            dev, &hw::t6034::CONFIG, &fixture_adt(), None,
+        )?;
+        // A packet-only preflight unexpectedly succeeded. Keep this distinct
+        // from its required EINVAL refusal so the C assertion detects it.
+        return Err(EOPNOTSUPP);
+    }
     let reference = native_reference(dev, chip)?;
     let record::GroupingEvidence::Native {
         count,
@@ -119,50 +115,6 @@ fn run(dev: &device::Device, chip: u32, full: bool, output: &mut [u32]) -> Resul
         cells[16 + count + n] = secondary[n] as u32;
         cells[16 + 2 * count + n] = reference.relative_power.as_slice()[n];
     }
-    let len = if let Some((hardware, globals, power, khz)) = images {
-        if word(&hardware, hwdata::DVFS_COUNT)? != count as u32 - 1
-            || word(&hardware, record::MAX_POWER)? != reference.max_power_mw
-            || word(&globals, 0x78)? != reference.max_power_mw
-            || word(&power, 0xd0)? != reference.max_power_mw
-        {
-            return Err(EINVAL);
-        }
-        for at in [0x7c, 0x80, 0x8c] {
-            if word(&globals, at)? != 100 * (count as u32 - 1) {
-                return Err(EINVAL);
-            }
-        }
-        for (offset, mask) in [
-            (0x8ac, reference.fast_die_mask),
-            (0x1490, reference.sochot_mask),
-            (0x24a8, reference.alarm_mask),
-        ] {
-            let at = record::HWDATA_A + offset;
-            if hardware.get(at..at + 16) != Some(mask.to_le_bytes().as_slice()) {
-                return Err(EINVAL);
-            }
-        }
-        for (n, &ratio) in reference.relative_power.as_slice().iter().enumerate() {
-            if word(&hardware, 0x105c + 4 * n)? != ratio {
-                return Err(EINVAL);
-            }
-        }
-        let table = super::super::power::pstate::Table::from_record(&hardware).ok_or(EINVAL)?;
-        if table.khz(count as u32 - 1) != Some(khz) || table.khz(count as u32).is_some() {
-            return Err(EINVAL);
-        }
-        cells[len..len + 6].copy_from_slice(&[
-            hardware.len() as u32,
-            globals.len() as u32,
-            power.len() as u32,
-            word(&hardware, 0xa28)?,
-            word(&hardware, record::IOMAPS + 32 * 11 + 0x10)?,
-            khz,
-        ]);
-        len + 6
-    } else {
-        len
-    };
     // Ref owns every field after native_reference's temporary Property/KVec
     // has gone out of scope. No bytes are exposed on a returned refusal.
     output[..len].copy_from_slice(&cells[..len]);
@@ -190,6 +142,120 @@ unsafe extern "C" fn asahi_g15_native_board_test(
     let output = unsafe { core::slice::from_raw_parts_mut(output, 70) };
     match run(dev, chip, full, output) {
         Ok(len) => len as i32,
+        Err(error) => error.to_errno(),
+    }
+}
+
+
+fn native_images(dev: &device::Device, bundle: &native::Bundle, output: &mut [u32]) -> Result {
+    let bound = native::Bound::new(bundle, 0x6034).map_err(|_| EINVAL)?;
+    let reference = bound.reference();
+    let tables = bound.tables();
+    let record::GroupingEvidence::Native { count, primary, secondary } = reference.grouping else {
+        return Err(EINVAL);
+    };
+    let mut adt = fixture_adt();
+    // Poison the unrelated legacy cache. No OPP phandles exist on the test
+    // device, so reconstructing performance input cannot silently succeed.
+    adt.perf_mhz.fill(u32::MAX);
+    adt.perf_mv.fill(u32::MAX);
+    adt.cluster_mv.fill([u32::MAX; 4]);
+    adt.cluster_cells = 0;
+    adt.sram_mv.fill(1);
+    let (hardware, globals, power, khz) = super::super::initdata::prepare_board(
+        dev, &hw::t6034::CONFIG, &adt, Some(bundle),
+    )?;
+    if count != 9 || word(&hardware, hwdata::DVFS_COUNT)? != 8
+        || word(&hardware, record::MAX_POWER)? != reference.max_power_mw
+        || word(&globals, 0x78)? != reference.max_power_mw
+        || word(&power, 0xd0)? != reference.max_power_mw
+        || word(&globals, 0x7c)? != 600 || word(&globals, 0x80)? != 600
+        || word(&globals, 0x8c)? != 700 || khz != 713000
+    {
+        return Err(EINVAL);
+    }
+    for (offset, mask) in [(0x8ac, reference.fast_die_mask),
+        (0x1490, reference.sochot_mask), (0x24a8, reference.alarm_mask)]
+    {
+        let at = record::HWDATA_A + offset;
+        if hardware.get(at..at + 16) != Some(mask.to_le_bytes().as_slice()) {
+            return Err(EINVAL);
+        }
+    }
+    for state in 0..count {
+        let a = primary[state] as usize;
+        let b = secondary[state] as usize;
+        if word(&hardware, 0xb5c + state * 4)? != tables.main.hz[a] / 1_000_000
+            || word(&hardware, 0xf9c + state * 4)? != tables.main.hz[b] / 1_000_000
+            || word(&hardware, 0x1350 + state * 4)? != tables.main.hz[b] / 1_000_000
+            || word(&hardware, 0x10dc + state * 4)? != primary[state] as u32
+            || word(&hardware, 0x111c + state * 4)? != secondary[state] as u32
+            || word(&hardware, 0x105c + state * 4)? != reference.relative_power.as_slice()[state]
+        {
+            return Err(EINVAL);
+        }
+        for lane in 0..8 {
+            if word(&hardware, 0xb9c + state * 32 + lane * 4)? != tables.main.mv[a][lane]
+                || word(&hardware, 0xd9c + state * 32 + lane * 4)? != tables.main.sram_mv[a][lane]
+            {
+                return Err(EINVAL);
+            }
+        }
+        for lane in 0..4 {
+            if word(&hardware, 0x1390 + state * 32 + lane * 4)? != tables.main.mv[b][lane]
+                || word(&hardware, 0x1590 + state * 32 + lane * 4)? != tables.main.sram_mv[b][lane]
+            {
+                return Err(EINVAL);
+            }
+        }
+    }
+    for (base, capacity, raw, cap) in [(0x115c, 16, &tables.cs, tables.caps[1]),
+        (0x12a4, 8, &tables.afr, tables.caps[2])]
+    {
+        if word(&hardware, base)? != raw.count - 1 || word(&hardware, base + 4)? != cap {
+            return Err(EINVAL);
+        }
+        for row in 0..raw.count as usize {
+            if word(&hardware, base + 8 + row * 4)? != raw.hz[row] / 1_000_000
+                || word(&hardware, base + 8 + capacity * 4 + row * 8)? != raw.mv[row][0]
+                || word(&hardware, base + 8 + capacity * 12 + row * 8)? != raw.sram_mv[row][0]
+            {
+                return Err(EINVAL);
+            }
+        }
+    }
+    for (row, expected) in adt.sensor_rows.iter().enumerate() {
+        let at = record::HWDATA_A + 0x6c58 + 12 * row;
+        if hardware.get(at..at + 12) != Some(expected.as_slice()) {
+            return Err(EINVAL);
+        }
+    }
+    let status = super::super::power::pstate::Table::from_record(&hardware).ok_or(EINVAL)?;
+    if status.khz(8) != Some(660000) || status.khz(9).is_some() { return Err(EINVAL); }
+    output.copy_from_slice(&[hardware.len() as u32, globals.len() as u32,
+        power.len() as u32, word(&hardware, 0xa28)?,
+        word(&hardware, record::IOMAPS + 32 * 11 + 0x10)?, khz]);
+    Ok(())
+}
+
+/// C owns a live unregistered device, an aligned initialized immutable C bundle
+/// and a disjoint six-u32 output for the entire synchronous call. No hardware.
+#[no_mangle]
+unsafe extern "C" fn asahi_g15_native_bundle_images_test(
+    raw: *mut bindings::device, bundle: *const core::ffi::c_void,
+    length: usize, output: *mut u32,
+) -> i32 {
+    if raw.is_null() || bundle.is_null() || output.is_null()
+        || length != core::mem::size_of::<native::Bundle>()
+    {
+        return EINVAL.to_errno();
+    }
+    // SAFETY: The retained C device, exactly matching integer C ABI allocation
+    // and independent output satisfy the stated synchronous test contract.
+    let (dev, bundle, output) = unsafe { (device::Device::from_raw(raw),
+        &*bundle.cast::<native::Bundle>(), core::slice::from_raw_parts_mut(output, 6)) };
+    match native_images(dev, bundle, output) {
+        Ok(()) => 6,
         Err(error) => error.to_errno(),
     }
 }

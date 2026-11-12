@@ -1096,16 +1096,14 @@ pub(crate) fn build(out: &mut [u8], i: &Inputs<'_>) -> R<()> {
     tail(out)
 }
 
-/// Explicit native-record path. Performance rows come exclusively from `n`;
-/// `i.main/cs/afr` are not substituted for missing native data. Other metadata
-/// keeps the current record layout and remains separately caller-qualified.
-/// Like `build`, this is a scratch builder: publish only after complete success.
-pub(crate) fn build_native(out: &mut [u8], i: &Inputs<'_>, n: &NativeTables) -> R<()> {
-    let GroupingEvidence::Native { count, primary, secondary } = i.reference.grouping else {
+/// Shared shape/selection/shared-rail validation for bundle binding and the
+/// scratch writer. This checks internal consistency, not input provenance.
+pub(super) fn validate_native(reference: &Reference, n: &NativeTables) -> R<()> {
+    let GroupingEvidence::Native { count, primary, secondary } = reference.grouping else {
         return Err("native performance tables require native grouping");
     };
-    if out.len() != SIZE || i.reference.chip_id != 0x6034 ||
-        !i.reference.matches_chip(0x6034) || !(2..=PERF_STATES as u32).contains(&n.main.count) ||
+    if reference.chip_id != 0x6034 ||
+        !reference.matches_chip(0x6034) || !(2..=PERF_STATES as u32).contains(&n.main.count) ||
         n.main.tables != CLUSTERS as u32 || n.cs.channels != 1 || n.afr.channels != 1 ||
         !(2..=CS_STATES as u32).contains(&n.cs.count) ||
         !(2..=AFR_STATES as u32).contains(&n.afr.count) ||
@@ -1119,6 +1117,22 @@ pub(crate) fn build_native(out: &mut [u8], i: &Inputs<'_>, n: &NativeTables) -> 
             return Err("native CS/AFR shared rail differs");
         }
     }
+    Ok(())
+}
+
+/// Native performance rows come exclusively from `n`, preserving both maps.
+/// Other metadata remains caller-qualified. Publish only after full success.
+pub(crate) fn build_native(out: &mut [u8], i: &Inputs<'_>, n: &NativeTables) -> R<()> {
+    if out.len() != SIZE {
+        return Err("native hardware record size");
+    }
+    if i.chip_id != 0x6034 || i.reference.chip_id != i.chip_id {
+        return Err("native hardware record chip identity");
+    }
+    validate_native(i.reference, n)?;
+    let GroupingEvidence::Native { count, primary, secondary } = i.reference.grouping else {
+        return Err("native performance tables require native grouping");
+    };
     let mut main = [Opp::default(); PERF_STATES];
     let mut cs = [Opp::default(); CS_STATES];
     let mut afr = [Opp::default(); AFR_STATES];

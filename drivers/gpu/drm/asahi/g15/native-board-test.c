@@ -5,12 +5,14 @@
 #include <linux/atomic.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include "native-power-fixture.h"
 
 #define NATIVE_PROPERTY "asahi,g15c-native-board-data"
 #define HEADER 16
 #define CAPACITY 70
 extern int asahi_g15_native_board_test(struct device *, u32, bool, u32 *);
 extern const char *asahi_g15_native_board_test_prop(u32, u32 *);
+extern int asahi_g15_native_bundle_images_test(struct device *, const void *, size_t, u32 *);
 static atomic_t serial = ATOMIC_INIT(0);
 
 struct fixture {
@@ -231,15 +233,15 @@ static void bad_maps_or_zero_state(struct kunit *test)
 	}
 }
 
-static void full_current_preflight(struct kunit *test)
+static void packet_only_refuses_preflight(struct kunit *test)
 {
 	u32 cells[CAPACITY];
 	size_t bytes = packet(cells, 14);
 
-	run(test, cells, bytes, 0x6034, true, bytes / 4 + 6);
+	run(test, cells, bytes, 0x6034, true, -EINVAL);
 }
 
-static void full_mismatched_maps(struct kunit *test)
+static void packet_only_changed_maps_refuse(struct kunit *test)
 {
 	u32 cells[CAPACITY];
 	size_t bytes = packet(cells, 14);
@@ -262,6 +264,71 @@ static void chip_scope(struct kunit *test)
 	run(test, cells, bytes, 0x6034, true, -EINVAL);
 }
 
+static void native_bundle_images(struct kunit *test)
+{
+	struct fixture *f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	struct g15c_power_fixture *input = g15c_power_fixture_new(test);
+	struct g15c_board_bundle *bundle = kunit_kmalloc(test, sizeof(*bundle), GFP_KERNEL);
+	struct platform_device *pdev;
+	u32 output[6], value;
+	char name[64];
+	int n;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, input);
+	KUNIT_ASSERT_NOT_NULL(test, bundle);
+	/* Keep the separately qualified base-state invariant while retaining a
+	 * repeated/nonmonotonic primary map and independent secondary stream. */
+	input->input.map_banks[0][0] &= ~(15U << 16);
+	input->input.map_banks[0][0] |= 1U << 16;
+	KUNIT_ASSERT_EQ(test, asahi_g15c_source_bundle(&input->input, 0x6034, bundle), G15C_OK);
+	f->test = test;
+	of_changeset_init(&f->changes);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, cleanup_tree, f), 0);
+	snprintf(name, sizeof(name), "/g15-native-images-kunit-%u",
+		 (unsigned int)atomic_inc_return(&serial));
+	f->node = of_changeset_create_node(&f->changes, of_root, name);
+	KUNIT_ASSERT_NOT_NULL(test, f->node);
+	KUNIT_ASSERT_EQ(test, of_changeset_add_prop_string(&f->changes, f->node, "status", "disabled"), 0);
+	for (n = 0; n < 64; n++) {
+		const char *key = asahi_g15_native_board_test_prop(n, &value);
+
+		if (!key)
+			break;
+		if (!strcmp(key, "apple,min-sram-microvolt") ||
+		    !strcmp(key, "apple,csafr-min-sram-microvolt"))
+			value = 1400000;
+		KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes, f->node, key, value), 0);
+	}
+	KUNIT_ASSERT_EQ(test, n, 43);
+	KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes,
+		f->node, "apple,idleoff-standby-timer", 42), 0);
+	/* No OPP phandles or short native packet: the owned bundle supplies all
+	 * performance data. The device stays unregistered and disabled. */
+	KUNIT_ASSERT_EQ(test, of_changeset_apply(&f->changes), 0);
+	f->applied = true;
+	pdev = platform_device_alloc("g15-native-images-kunit", PLATFORM_DEVID_NONE);
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	pdev->dev.of_node = of_node_get(f->node);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, cleanup_device, pdev), 0);
+	KUNIT_ASSERT_EQ(test, dev_set_name(&pdev->dev, "g15-native-images-kunit-%u",
+		(unsigned int)atomic_read(&serial)), 0);
+	KUNIT_ASSERT_EQ(test, asahi_g15_native_bundle_images_test(&pdev->dev,
+		bundle, sizeof(*bundle), output), 6);
+	KUNIT_EXPECT_EQ(test, output[0], 0xb480U);
+	KUNIT_EXPECT_EQ(test, output[1], 15868U);
+	KUNIT_EXPECT_EQ(test, output[2], 2292U);
+	KUNIT_EXPECT_EQ(test, output[3], 0x6034U);
+	KUNIT_EXPECT_EQ(test, output[4], 6U * 0xd8000);
+	KUNIT_EXPECT_EQ(test, output[5], 713000U);
+	/* The bound packet and table geometry must agree before image writes. */
+	bundle->tables.caps[0] = SELECTED;
+	memset(output, 0xa5, sizeof(output));
+	KUNIT_EXPECT_EQ(test, asahi_g15_native_bundle_images_test(&pdev->dev,
+		bundle, sizeof(*bundle), output), -EINVAL);
+	KUNIT_EXPECT_PTR_EQ(test, memchr_inv(output, 0xa5, sizeof(output)), NULL);
+}
+
 static struct kunit_case cases[] = {
 	KUNIT_CASE(missing_property),
 	KUNIT_CASE(exact_roundtrip),
@@ -269,9 +336,10 @@ static struct kunit_case cases[] = {
 	KUNIT_CASE(bad_contract_or_model),
 	KUNIT_CASE(bad_counts),
 	KUNIT_CASE(bad_maps_or_zero_state),
-	KUNIT_CASE(full_current_preflight),
-	KUNIT_CASE(full_mismatched_maps),
+	KUNIT_CASE(packet_only_refuses_preflight),
+	KUNIT_CASE(packet_only_changed_maps_refuse),
 	KUNIT_CASE(chip_scope),
+	KUNIT_CASE(native_bundle_images),
 	{}
 };
 

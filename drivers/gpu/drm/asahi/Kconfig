@@ -91,6 +91,7 @@ config DRM_ASAHI_G15_NATIVE_POWER
 config DRM_ASAHI_G15_BOARD_KUNIT_TEST
 	bool "Test G15 native board metadata with KUnit"
 	depends on KUNIT && DRM_ASAHI=y && DRM_ASAHI_G15 && OF_DYNAMIC
+	depends on DRM_ASAHI_G15_NATIVE_POWER
 	default n
 	help
 	  Exercise the real OF property reader and synchronous T6034 board-image

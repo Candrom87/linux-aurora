@@ -171,15 +171,19 @@ fn device_tree_board(
     dev: &device::Device,
     cfg: &Config,
     adt: &GpuAdt,
-    reference: &board::record::Reference,
+    source: &board::native::Source<'_>,
 ) -> Result<(KVVec<u8>, KVVec<u8>, KVVec<u8>, u32)> {
-    let hw_img = board::hardware_record(dev, cfg, adt, reference)?;
-    let (glob, pwr, max_power_mw) = board::device_tree(dev, &hw_img)?;
+    let hw_img = board::hardware_record(dev, cfg, adt, source)?;
+    let (glob, pwr, max_power_mw) = board::device_tree(dev, &hw_img, source)?;
     let max_mhz = if cfg.board == hw::Board::DeviceTreeNative {
-        // The selected primary top, not an unrelated raw ADT row or S8 map.
+        // Maximum serialized primary MHz, preserving repeat/nonmonotonic order.
         let top = get32(&hw_img, hwdata::DVFS_COUNT)? as usize;
         if top == 0 || top >= board::record::STATES { return Err(EINVAL); }
-        get32(&hw_img, hwdata::DVFS_A_MHZ + 4 * top)?
+        let mut maximum = 0;
+        for state in 0..=top {
+            maximum = maximum.max(get32(&hw_img, hwdata::DVFS_A_MHZ + 4 * state)?);
+        }
+        maximum
     } else {
         adt.perf_mhz.iter().copied().max().unwrap_or(0)
     };
@@ -214,13 +218,24 @@ pub(crate) fn prepare_board(
     dev: &device::Device,
     cfg: &Config,
     adt: &GpuAdt,
+    native: Option<&board::native::Bundle>,
 ) -> Result<BoardImages> {
+    if native.is_some() && cfg.board != hw::Board::DeviceTreeNative {
+        return Err(EINVAL);
+    }
     match cfg.board {
         hw::Board::Templates => templates(dev, adt),
-        hw::Board::DeviceTree(reference) => device_tree_board(dev, cfg, adt, reference),
+        hw::Board::DeviceTree(reference) => device_tree_board(dev, cfg, adt,
+            &board::native::Source::Legacy(reference)),
         hw::Board::DeviceTreeNative => {
-            let reference = board::native_reference(dev, cfg.chip_id)?;
-            device_tree_board(dev, cfg, adt, &reference)
+            let bundle = native.ok_or(EINVAL).inspect_err(|_| {
+                dev_err!(dev, "native board requires an owned computed table bundle\n");
+            })?;
+            let bound = board::native::Bound::new(bundle, cfg.chip_id).map_err(|why| {
+                dev_err!(dev, "native board bundle: {}\n", why);
+                EINVAL
+            })?;
+            device_tree_board(dev, cfg, adt, &board::native::Source::Native(bound))
         }
         hw::Board::None => Err(ENODEV),
     }

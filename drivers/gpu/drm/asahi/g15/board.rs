@@ -19,6 +19,7 @@ pub(crate) mod data;
 pub(crate) mod record;
 pub(crate) mod template;
 pub(crate) mod words;
+pub(crate) mod native;
 #[cfg(CONFIG_DRM_ASAHI_G15_BOARD_KUNIT_TEST)]
 mod native_test;
 
@@ -114,6 +115,7 @@ fn aux_opps(
 /// Source-qualified model transport from this boot's device tree. Parsing
 /// validates shape, identity and independent fields; it does not qualify a
 /// firmware ABI, producer provenance or a new board by itself.
+#[cfg(CONFIG_DRM_ASAHI_G15_BOARD_KUNIT_TEST)]
 pub(crate) fn native_reference(dev: &device::Device, chip: u32) -> Result<record::Reference> {
     let node = dev.of_node().ok_or(ENODEV)?;
     let property: kernel::of::Property<'_> =
@@ -139,8 +141,14 @@ pub(crate) fn hardware_record(
     dev: &device::Device,
     cfg: &super::Config,
     adt: &GpuAdt,
-    reference: &record::Reference,
+    source: &native::Source<'_>,
 ) -> Result<KVVec<u8>> {
+    let reference = source.reference();
+    let native = source.tables();
+    if (cfg.board == hw::Board::DeviceTreeNative) != native.is_some() {
+        dev_err!(dev, "native board requires its complete imported table bundle\n");
+        return Err(EINVAL);
+    }
     if !reference.matches_chip(cfg.chip_id) {
         dev_err!(dev, "GPU board-data chip or grouping evidence mismatch\n");
         return Err(EINVAL);
@@ -158,7 +166,7 @@ pub(crate) fn hardware_record(
     }
     let zones: KVec<u32> = node.get_opt_property(words::ZONES)?.unwrap_or_default();
     let mut main = [record::Opp::default(); record::PERF_STATES];
-    for (i, o) in main.iter_mut().enumerate() {
+    for (i, o) in main.iter_mut().enumerate().filter(|_| native.is_none()) {
         *o = record::Opp {
             mhz: adt.perf_mhz[i],
             mv: adt.cluster_mv[i],
@@ -167,8 +175,8 @@ pub(crate) fn hardware_record(
     }
     let mut cs = [record::Opp::default(); 16];
     let mut afr = [record::Opp::default(); 8];
-    let ncs = aux_opps(dev, &node, c_str!("apple,cs-opp"), &mut cs)?;
-    let nafr = aux_opps(dev, &node, c_str!("apple,afr-opp"), &mut afr)?;
+    let ncs = if native.is_none() { aux_opps(dev, &node, c_str!("apple,cs-opp"), &mut cs)? } else { 0 };
+    let nafr = if native.is_none() { aux_opps(dev, &node, c_str!("apple,afr-opp"), &mut afr)? } else { 0 };
     if layout.record_slots.len() != layout.iomaps.len() {
         return Err(EINVAL);
     }
@@ -202,7 +210,12 @@ pub(crate) fn hardware_record(
         reference,
     };
     let mut out = KVVec::from_elem(0u8, record::SIZE, GFP_KERNEL)?;
-    record::build(&mut out, &inputs).map_err(|why| {
+    let result = if let Some(native) = native {
+        record::build_native(&mut out, &inputs, native)
+    } else {
+        record::build(&mut out, &inputs)
+    };
+    result.map_err(|why| {
         dev_err!(dev, "hardware record from the device tree: {}\n", why);
         EINVAL
     })?;
@@ -215,6 +228,7 @@ pub(crate) fn hardware_record(
 pub(crate) fn device_tree(
     dev: &device::Device,
     hardware: &[u8],
+    source: &native::Source<'_>,
 ) -> Result<(KVVec<u8>, KVVec<u8>, u32)> {
     let w = power_words(dev)?;
     let at = hwdata::HWDATA_A + hwdata::MAX_POWER_A;
@@ -244,6 +258,12 @@ pub(crate) fn device_tree(
             dev_err!(dev, "board data from the device tree: {}\n", why);
             EINVAL
         })?;
+    if let Some(native) = source.tables() {
+        record::native_globals(&mut glob, hardware, native).map_err(|why| {
+            dev_err!(dev, "native board Globals: {}\n", why);
+            EINVAL
+        })?;
+    }
     Ok((glob, pwr, max_power_mw))
 }
 

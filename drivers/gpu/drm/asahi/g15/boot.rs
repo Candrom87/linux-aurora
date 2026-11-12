@@ -549,7 +549,10 @@ pub(crate) fn admit(
         );
         return Err(EINVAL);
     }
-    let board_images = initdata::prepare_board(dev, cfg, &adt)?;
+    // The native input owner/acquisition path must supply the complete computed
+    // bundle here. An OF packet alone cannot replace native SRAM/maps/caps.
+    // Until that provider is connected, T6034 refuses before Regs::new/hold_power.
+    let board_images = initdata::prepare_board(dev, cfg, &adt, None)?;
     let regs = regs::Regs::new(pdev)?;
     // Keep the GFX domain powered for the whole (retained) session.
     glue::hold_power(dev);
