@@ -105,6 +105,6 @@ config DRM_ASAHI_G15_POWER_KUNIT_TEST
 	help
 	  Run explicit-input arithmetic and SRAM/cap import through the actual
 	  Linux FPU ownership API in the marked QEMU metadata fixture. Checks
-	  atomic failures and interrupt/atomic/nested-context refusal as well.
+	  atomic failures and IRQ-disabled/atomic/nested-context refusal as well.
 	  No GPU device, registers, firmware or power operation is used.
 	  The test skips on other machines. Say N outside CPU testing.
