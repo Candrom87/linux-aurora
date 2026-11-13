@@ -172,9 +172,9 @@ pub(crate) fn native_bundle(
     }
 }
 
-/// The hardware record of a device-tree SoC ([`record`]): built from the GPU node's properties
-/// and operating-point tables, the layout's IOMapping table, the ADT regions and sensor rows,
-/// and the SoC's `reference` words, which neither carries.
+/// Hardware record from the layout and source. Native controllers, performance
+/// tables and sensors use the original owned ADT; legacy profiles use OF/OPPs
+/// and their reference words.
 pub(crate) fn hardware_record(
     dev: &device::Device,
     cfg: &super::Config,
@@ -194,15 +194,25 @@ pub(crate) fn hardware_record(
     let layout = cfg.layout;
     let node = dev.of_node().ok_or(ENODEV)?;
     let mut props = [0u32; record::PROPS.len()];
-    for (value, (name, default)) in props.iter_mut().zip(record::PROPS.iter()) {
-        *value = match node.get_opt_property(name)? {
-            Some(v) => v,
-            None => default
-                .ok_or(EINVAL)
-                .inspect_err(|_| dev_err!(dev, "GPU node has no u32 {}\n", name))?,
-        };
-    }
-    let zones: KVec<u32> = node.get_opt_property(words::ZONES)?.unwrap_or_default();
+    let legacy_zones: KVec<u32>;
+    let zones = if let Some(controllers) = source.controllers() {
+        if !adt.native.as_ref().ok_or(EINVAL)?.owns_controllers(controllers) {
+            return Err(EINVAL);
+        }
+        props = *controllers.record();
+        controllers.zones()
+    } else {
+        for (value, (name, default)) in props.iter_mut().zip(record::PROPS.iter()) {
+            *value = match node.get_opt_property(name)? {
+                Some(v) => v,
+                None => default
+                    .ok_or(EINVAL)
+                    .inspect_err(|_| dev_err!(dev, "GPU node has no u32 {}\n", name))?,
+            };
+        }
+        legacy_zones = node.get_opt_property(words::ZONES)?.unwrap_or_default();
+        &legacy_zones
+    };
     let mut main = [record::Opp::default(); record::PERF_STATES];
     for (i, o) in main.iter_mut().enumerate().filter(|_| native.is_none()) {
         *o = record::Opp {
@@ -234,7 +244,7 @@ pub(crate) fn hardware_record(
     let inputs = record::Inputs {
         chip_id: cfg.chip_id,
         props,
-        zones: &zones,
+        zones,
         main: &main,
         cs: &cs[..ncs],
         afr: &afr[..nafr],
@@ -262,15 +272,17 @@ pub(crate) fn hardware_record(
     Ok(out)
 }
 
-/// Globals and Power of a device-tree SoC: the verified G15S templates with the GPU node's
-/// power words and the maximum power of `hardware`, this machine's hardware record. Returns the
-/// two images and that maximum power in mW.
+/// Globals and Power from verified templates, the same source's controller
+/// words and the completed hardware record. Native model units remain
+/// unqualified; legacy reference maximum power is in mW.
 pub(crate) fn device_tree(
     dev: &device::Device,
     hardware: &[u8],
     source: &native::Source<'_>,
 ) -> Result<(KVVec<u8>, KVVec<u8>, u32)> {
-    let w = power_words(dev)?;
+    let w = if let Some(controllers) = source.controllers() {
+        *controllers.power()
+    } else { power_words(dev)? };
     let at = hwdata::HWDATA_A + hwdata::MAX_POWER_A;
     let max_power_mw = u32::from_le_bytes(
         hardware

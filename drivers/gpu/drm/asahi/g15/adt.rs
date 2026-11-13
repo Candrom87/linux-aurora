@@ -41,6 +41,7 @@ use super::boot::glue;
 use super::hw;
 
 pub(crate) mod native;
+pub(crate) mod native_controls;
 pub(crate) mod native_mtr;
 pub(crate) mod native_firmware;
 pub(crate) mod source;
@@ -77,6 +78,14 @@ impl NativeAdt {
 
     pub(crate) fn properties(&self, chip: u32) -> Result<native::Properties<'_>> {
         native::parse(&self.data, chip).map_err(|_| EINVAL)
+    }
+
+    pub(crate) fn controllers(&self, chip: u32) -> Result<native_controls::Settings<'_>> {
+        native_controls::Settings::parse(&self.data, chip).map_err(|_| EINVAL)
+    }
+
+    pub(crate) fn owns_controllers(&self, settings: &native_controls::Settings<'_>) -> bool {
+        settings.belongs_to(&self.data)
     }
 
     /// Enabled sensor membership from this same immutable source copy. This

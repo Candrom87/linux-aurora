@@ -239,12 +239,13 @@ pub(crate) fn prepare_board(
             if !firmware.matches(dev, snapshot) {
                 return Err(EINVAL);
             }
+            let controllers = snapshot.controllers(cfg.chip_id)?;
             let bundle = board::native_bundle(snapshot, firmware, words, cfg.chip_id)?;
             let bound = board::native::Bound::new(&bundle, cfg.chip_id).map_err(|why| {
                 dev_err!(dev, "native board bundle: {}\n", why);
                 EINVAL
             })?;
-            device_tree_board(dev, cfg, adt, &board::native::Source::Native(bound))
+            device_tree_board(dev, cfg, adt, &board::native::Source::Native(bound, controllers))
         }
         hw::Board::None => Err(ENODEV),
     }
@@ -257,7 +258,8 @@ pub(crate) fn fixture_bundle_board(
     dev: &device::Device, cfg: &Config, adt: &GpuAdt, bundle: &board::native::Bundle,
 ) -> Result<BoardImages> {
     let bound = board::native::Bound::new(bundle, cfg.chip_id).map_err(|_| EINVAL)?;
-    device_tree_board(dev, cfg, adt, &board::native::Source::Native(bound))
+    let controllers = adt.native.as_ref().ok_or(EINVAL)?.controllers(cfg.chip_id)?;
+    device_tree_board(dev, cfg, adt, &board::native::Source::Native(bound, controllers))
 }
 
 /// Builds the initdata graph. Returns it with its channels and the top DVFS frequency in kHz.

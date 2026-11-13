@@ -80,5 +80,21 @@ same-copy/device association and runs the typed producer into all three images.
 Its positive firmware context is explicitly synthetic and test-only, not loaded
 firmware measurement; its descriptor appears in no production profile. This is
 not proof of fresh power-owned register acquisition or physical compatibility.
-Controller properties still come through OF and need association with that same
-original source. Qualified provider/power/cache/memory/startup remains required.
+Native controller properties now come from that same original source too.
+The typed source owns its borrowed settings alongside the bound bundle; record
+construction rejects settings borrowed from another equal-content copy. All
+record/Globals/Power controller inputs bypass OF for native profiles. Legacy
+profiles retain their OF path. The reader preserves optional reset/delta
+overrides, decodes little-endian scalar bits without float conversion, and
+requires complete contiguous power-zone triples, at most five. Partial/holey
+zones and a sixth row refuse rather than silently dropping configured inputs.
+The two legacy SRAM-floor slots stay unused/zero; the native bundle supplies
+every actual SRAM voltage. This is not a fallback power or thermal policy.
+
+The Linux fixture poisons every independent OF scalar and supplies malformed
+OF zones, then checks original controller words in all three startup images,
+including optional overrides, two power zones, a sample-period gain product and
+the standby timer. A separate wrong-owner case refuses before record writing.
+The pure CPU controller suite checks scalar/order/endian/missing/duplicate
+rules, zones, original-copy identity and borrow escapes on invented data only.
+Qualified provider/power/cache/memory/startup remains required.

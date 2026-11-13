@@ -3,6 +3,7 @@
 #include <kunit/test.h>
 #include <kunit/resource.h>
 #include <linux/atomic.h>
+#include <linux/limits.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include "native-power-fixture.h"
@@ -297,14 +298,21 @@ static void native_bundle_images(struct kunit *test)
 
 		if (!key)
 			break;
-		if (!strcmp(key, "apple,min-sram-microvolt") ||
-		    !strcmp(key, "apple,csafr-min-sram-microvolt"))
-			value = 1400000;
+		/* Native construction must ignore every independent OF controller
+		 * cell, including values that would refuse if accidentally consumed.
+		 */
+		value = U32_MAX;
 		KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes, f->node, key, value), 0);
 	}
 	KUNIT_ASSERT_EQ(test, n, 43);
 	KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32(&f->changes,
-		f->node, "apple,idleoff-standby-timer", 42), 0);
+		f->node, "apple,idleoff-standby-timer", U32_MAX), 0);
+	{
+		const u32 invalid_zones[] = { U32_MAX, 0, 0, U32_MAX };
+
+		KUNIT_ASSERT_EQ(test, of_changeset_add_prop_u32_array(&f->changes,
+			f->node, "apple,power-zones", invalid_zones, ARRAY_SIZE(invalid_zones)), 0);
+	}
 	/* No OPP phandles or short native packet: the owned bundle supplies all
 	 * performance data. The device stays unregistered and disabled. */
 	KUNIT_ASSERT_EQ(test, of_changeset_apply(&f->changes), 0);

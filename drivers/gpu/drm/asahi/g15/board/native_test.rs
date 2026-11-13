@@ -294,8 +294,15 @@ fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Res
     {
         return Err(EINVAL);
     }
-    adt.native = Some(original);
+    let other = adt.native.replace(original).ok_or(EINVAL)?;
     if !firmware.matches(dev, adt.native.as_ref().ok_or(EINVAL)?) {
+        return Err(EINVAL);
+    }
+    let snapshot = adt.native.as_ref().ok_or(EINVAL)?;
+    let bundle = super::native_bundle(snapshot, &firmware, &words, 0x6034)?;
+    let bound = native::Bound::new(&bundle, 0x6034).map_err(|_| EINVAL)?;
+    let spliced = native::Source::Native(bound, other.controllers(0x6034)?);
+    if super::hardware_record(dev, &hw::t6034::CONFIG, &adt, &spliced).err() != Some(EINVAL) {
         return Err(EINVAL);
     }
     adt.perf_mhz.fill(u32::MAX);
@@ -314,6 +321,14 @@ fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Res
         || word(&hardware, record::MAX_POWER)? == 0
         || word(&globals, 0x78)? != word(&hardware, record::MAX_POWER)?
         || word(&power, 0xd0)? != word(&hardware, record::MAX_POWER)?
+        || word(&hardware, 0xa70)? != 8
+        || word(&hardware, record::HWDATA_A + 0x798)? != 9
+        || word(&hardware, record::HWDATA_A + 0x900)? != 300
+        || word(&hardware, record::HWDATA_A + 0xe84)? != 2
+        || word(&globals, 0x7a8)? != 99
+        || word(&power, 0xc)? != 2 || word(&power, 0x24)? != 5000
+        || word(&power, 0x28)? != 4800 || word(&power, 0x2c)? != 8
+        || word(&power, 0x14)? != 0x3dcc_cccd
     { return Err(EINVAL); }
     let snapshot = adt.native.as_ref().ok_or(EINVAL)?;
     let properties = snapshot.properties(0x6034)?;

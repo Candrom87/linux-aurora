@@ -131,17 +131,21 @@ impl<'a> Bound<'a> {
     pub(crate) fn tables(&self) -> &NativeTables { &self.bundle.tables }
 }
 
-/// Native reference and tables can only be provided through the same bundle.
+/// Native reference/tables share one bundle and controller settings retain
+/// their original ADT borrow. Record construction checks that owner too.
 pub(crate) enum Source<'a> {
     Legacy(&'a Reference),
-    Native(Bound<'a>),
+    Native(Bound<'a>, crate::g15::adt::native_controls::Settings<'a>),
 }
 
 impl Source<'_> {
     pub(crate) fn reference(&self) -> &Reference {
-        match self { Self::Legacy(reference) => reference, Self::Native(bound) => bound.reference() }
+        match self { Self::Legacy(reference) => reference, Self::Native(bound, _) => bound.reference() }
     }
     pub(crate) fn tables(&self) -> Option<&NativeTables> {
-        match self { Self::Legacy(_) => None, Self::Native(bound) => Some(bound.tables()) }
+        match self { Self::Legacy(_) => None, Self::Native(bound, _) => Some(bound.tables()) }
+    }
+    pub(crate) fn controllers(&self) -> Option<&crate::g15::adt::native_controls::Settings<'_>> {
+        match self { Self::Legacy(_) => None, Self::Native(_, controls) => Some(controls) }
     }
 }
