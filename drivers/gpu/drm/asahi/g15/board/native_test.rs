@@ -335,8 +335,10 @@ fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Res
         ("Power model", power.as_slice(), 0xd0, model),
         ("sample period", hardware.as_slice(), 0xa70, 8),
         ("reset override", hardware.as_slice(), record::HWDATA_A + 0x798, 9),
-        ("delta override", hardware.as_slice(), record::HWDATA_A + 0x900, 300),
-        ("hardware zones", hardware.as_slice(), record::HWDATA_A + 0xe84, 2),
+        // G15C expands the earlier mask/coefficient fields: these are the
+        // independent final offsets, not the G15S writer's source offsets.
+        ("delta override", hardware.as_slice(), record::HWDATA_A + 0x908, 300),
+        ("hardware zones", hardware.as_slice(), record::HWDATA_A + 0x108c, 2),
         ("standby", globals.as_slice(), 0x7a8, 99),
         ("power zones", power.as_slice(), 0xc, 2),
         ("zone target", power.as_slice(), 0x24, 5000),
