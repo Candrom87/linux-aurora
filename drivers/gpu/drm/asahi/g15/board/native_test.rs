@@ -265,6 +265,9 @@ unsafe extern "C" fn asahi_g15_native_bundle_images_test(
 
 
 fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Result {
+    // The same deliberately malformed OF zones still refuse on the legacy
+    // reader. Native success below must therefore use the original owner.
+    if super::power_words(dev).err() != Some(EINVAL) { return Err(EINVAL); }
     let mut adt = fixture_adt();
     adt.native = Some(super::super::adt::NativeAdt::read(dev, 0x6034)?);
     // Invented boot descriptors in the marked QEMU export. No firmware bytes
