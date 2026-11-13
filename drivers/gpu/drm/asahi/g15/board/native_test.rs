@@ -318,21 +318,39 @@ fn owned_images(dev: &device::Device, values: &[u32], output: &mut [u32]) -> Res
     )?;
     // The separate QEMU original table uses 200 + 40*n MHz for rows 1..13;
     // both selected maps retain row 13, so the maximum is 720 MHz.
-    if khz != 720000 || word(&hardware, hwdata::DVFS_COUNT)? != 8
-        || word(&globals, 0x7c)? != 600 || word(&globals, 0x80)? != 600
-        || word(&globals, 0x8c)? != 700
-        || word(&hardware, record::MAX_POWER)? == 0
-        || word(&globals, 0x78)? != word(&hardware, record::MAX_POWER)?
-        || word(&power, 0xd0)? != word(&hardware, record::MAX_POWER)?
-        || word(&hardware, 0xa70)? != 8
-        || word(&hardware, record::HWDATA_A + 0x798)? != 9
-        || word(&hardware, record::HWDATA_A + 0x900)? != 300
-        || word(&hardware, record::HWDATA_A + 0xe84)? != 2
-        || word(&globals, 0x7a8)? != 99
-        || word(&power, 0xc)? != 2 || word(&power, 0x24)? != 5000
-        || word(&power, 0x28)? != 4800 || word(&power, 0x2c)? != 8
-        || word(&power, 0x14)? != 0x3dcc_cccd
-    { return Err(EINVAL); }
+    if khz != 720000 {
+        dev_err!(dev, "invented controller fixture frequency {} != 720000\n", khz);
+        return Err(EINVAL);
+    }
+    let model = word(&hardware, record::MAX_POWER)?;
+    if model == 0 { return Err(EINVAL); }
+    // These values are invented in the marked QEMU fixture. Keep field-level
+    // diagnostics here so a model/controller regression identifies its word.
+    for (label, image, at, expected) in [
+        ("selected top", hardware.as_slice(), hwdata::DVFS_COUNT, 8),
+        ("first target", globals.as_slice(), 0x7c, 600),
+        ("second target", globals.as_slice(), 0x80, 600),
+        ("main cap", globals.as_slice(), 0x8c, 700),
+        ("Globals model", globals.as_slice(), 0x78, model),
+        ("Power model", power.as_slice(), 0xd0, model),
+        ("sample period", hardware.as_slice(), 0xa70, 8),
+        ("reset override", hardware.as_slice(), record::HWDATA_A + 0x798, 9),
+        ("delta override", hardware.as_slice(), record::HWDATA_A + 0x900, 300),
+        ("hardware zones", hardware.as_slice(), record::HWDATA_A + 0xe84, 2),
+        ("standby", globals.as_slice(), 0x7a8, 99),
+        ("power zones", power.as_slice(), 0xc, 2),
+        ("zone target", power.as_slice(), 0x24, 5000),
+        ("zone offset", power.as_slice(), 0x28, 4800),
+        ("zone filter", power.as_slice(), 0x2c, 8),
+        ("integral product", power.as_slice(), 0x14, 0x3dcc_cccd),
+    ] {
+        let actual = word(image, at)?;
+        if actual != expected {
+            dev_err!(dev, "invented controller fixture {} at {:#x}: {:#x} != {:#x}\n",
+                label, at, actual, expected);
+            return Err(EINVAL);
+        }
+    }
     let snapshot = adt.native.as_ref().ok_or(EINVAL)?;
     let properties = snapshot.properties(0x6034)?;
     let primary = [0usize, 1, 4, 6, 8, 10, 12, 13, 12];

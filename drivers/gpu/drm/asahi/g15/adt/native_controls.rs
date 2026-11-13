@@ -37,6 +37,33 @@ fn key<'a>(suffix: &[u8], storage: &'a mut [u8; 64]) -> R<&'a [u8]> {
     Ok(&storage[..end])
 }
 
+fn zone_names(adt: &Adt<'_>, node: usize) -> R<()> {
+    // Complete structural validation precedes this bounded property walk.
+    // Refuse every unsupported zone name, including rows beyond index five,
+    // instead of ignoring a configured field merely because lookup is bounded.
+    let count = le32(adt.data, node).ok_or("native controller property count")?;
+    let mut at = node + 8;
+    for _ in 0..count {
+        let field = &adt.data[at..at + 32];
+        let end = field.iter().position(|byte| *byte == 0).unwrap_or(32);
+        let name = &field[..end];
+        if name.starts_with(b"gpu-power-zone-") {
+            let index = [b"gpu-power-zone-target-offset-".as_slice(),
+                b"gpu-power-zone-target-".as_slice(), b"gpu-power-zone-filter-tc-".as_slice()]
+                .into_iter().find_map(|prefix| name.strip_prefix(prefix));
+            if !index.is_some_and(|value| value.len() == 1 &&
+                value[0] >= b'0' && value[0] < b'0' + words::MAX_ZONES as u8)
+            {
+                return Err("native controller unsupported zone name");
+            }
+        }
+        let length = (le32(adt.data, at + 32).ok_or("native controller property size")?
+            & 0x7fff_ffff) as usize;
+        at += 36 + length.next_multiple_of(4);
+    }
+    Ok(())
+}
+
 impl<'a> Settings<'a> {
     pub(super) fn parse(data: &'a [u8], chip: u32) -> R<Self> {
         if chip != 0x6034 || data.len() > 0x20_0000 {
@@ -49,6 +76,7 @@ impl<'a> Settings<'a> {
         if required(&adt, sgx, b"compatible")? != b"gpu,t6034\0" {
             return Err("native controller GPU identity");
         }
+        zone_names(&adt, sgx)?;
         let mut values = [0; record::PROPS.len()];
         for (value, (name, default)) in values.iter_mut().zip(record::PROPS.iter()) {
             let suffix = name.to_bytes().strip_prefix(b"apple,")
@@ -67,7 +95,7 @@ impl<'a> Settings<'a> {
         let mut gap = false;
         // Reject a partial/holey set instead of silently dropping configured
         // rows after the first missing target. The native format has five rows.
-        for index in 0..=words::MAX_ZONES {
+        for index in 0..words::MAX_ZONES {
             let mut row = [None; 3];
             for (cell, prefix) in row.iter_mut().zip([
                 b"gpu-power-zone-target-".as_slice(),
@@ -83,7 +111,7 @@ impl<'a> Settings<'a> {
                 gap = true;
                 continue;
             }
-            if gap || index == words::MAX_ZONES || row.iter().any(Option::is_none) {
+            if gap || row.iter().any(Option::is_none) {
                 return Err("native controller incomplete or excessive zones");
             }
             for (value, bytes) in zones[3 * index..3 * index + 3].iter_mut().zip(row) {

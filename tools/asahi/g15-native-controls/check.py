@@ -156,6 +156,12 @@ def main():
                          if key not in [zone_key(cell, missing) for cell in range(3)]]
         add(tree, missing == 1)
     add(fixture(6))
+    for suffix in ['5', '6', '9', '10', '00', '-1', 'x']:
+        for cell in range(3):
+            tree = copy.deepcopy(first)
+            name = zone_key(cell, 0)[:-1] + suffix
+            props(tree).append((name, struct.pack('<I', 1)))
+            add(tree)
     for key, value in [(zone_key(1, 0), 6000), (zone_key(2, 0), 0)]:
         tree = copy.deepcopy(first)
         replace(tree, key, struct.pack('<I', value))
@@ -207,7 +213,8 @@ def main():
                 ('optional-overrides', 'Some(bytes) => scalar(bytes)?,', 'Some(bytes) => default.unwrap_or(scalar(bytes)?),'),
                 ('wrong-source', 'core::ptr::eq(self.source, data)', 'self.source == data'),
                 ('power-order', 'values[index]', '{ let _ = index; values[0] }'),
-                ('zone-gap', 'if gap || index ==', 'if (false && gap) || index =='),
+                ('zone-gap', 'if gap ||', 'if (false && gap) ||'),
+                ('zone-names', 'zone_names(&adt, sgx)?;', 'if false { zone_names(&adt, sgx)?; }'),
                 ('zone-zero-tc', 'zones[3 * index + 2] == 0', '(false && zones[3 * index + 2] == 0)'),
                 ('zone-offset', 'zones[3 * index] < zones[3 * index + 1]', '(false && zones[3 * index] < zones[3 * index + 1])'),
             ]:
